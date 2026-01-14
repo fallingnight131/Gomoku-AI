@@ -152,8 +152,15 @@ pip install torch --index-url https://download.pytorch.org/whl/cu121
 
 训练过程会在 `backend/models/` 目录生成：
 - `checkpoint_{iter}.pth` - 每隔几轮保存的检查点
-- `best_model.pth` - 当前最佳模型
+- `best_model.pth` - 当前最佳模型（AlphaZero风格选择）
 - `training_stats.json` - 训练统计信息
+
+### 最佳模型选择策略
+
+采用 **AlphaZero 风格**的模型选择：
+1. 每轮训练后，新模型与当前最佳模型对弈 20 局
+2. 只有当新模型胜率 > 55% 时，才更新 `best_model.pth`
+3. 确保模型持续进步，避免过拟合导致性能下降
 
 ## 📁 项目结构
 

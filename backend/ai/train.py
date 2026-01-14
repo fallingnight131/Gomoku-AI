@@ -159,16 +159,28 @@ class Trainer:
             # Phase 3: 模型评估
             if iteration % save_interval == 0 or iteration == 1:
                 print("\n[Phase 3] 评估模型...")
-                win_rate = self._evaluate_vs_random(num_games=eval_games)
-                self.stats['win_rate_vs_random'] = win_rate
-                print(f"对随机玩家胜率: {win_rate*100:.1f}%")
+                
+                # 与随机玩家对弈（基础指标）
+                win_rate_random = self._evaluate_vs_random(num_games=eval_games)
+                self.stats['win_rate_vs_random'] = win_rate_random
+                print(f"对随机玩家胜率: {win_rate_random*100:.1f}%")
                 
                 # 保存检查点
                 self._save_checkpoint(iteration)
                 
-                # 更新最佳模型
-                if self.best_network is None or win_rate > 0.55:
+                # 与当前最佳模型对弈决定是否更新
+                if self.best_network is None:
+                    # 首次训练，直接保存
                     self._update_best_model(iteration)
+                else:
+                    # 新模型 vs 最佳模型
+                    win_rate_vs_best = self._evaluate_vs_best(num_games=eval_games)
+                    print(f"对最佳模型胜率: {win_rate_vs_best*100:.1f}%")
+                    
+                    if win_rate_vs_best > 0.55:
+                        self._update_best_model(iteration)
+                    else:
+                        print(f"未超过阈值(55%)，保留当前最佳模型")
             
             # 保存统计信息
             self._save_stats()
@@ -270,6 +282,52 @@ class Trainer:
         
         return wins / num_games
     
+    def _evaluate_vs_best(self, num_games: int = 20) -> float:
+        """
+        与当前最佳模型对战评估（AlphaZero风格）
+        
+        Returns:
+            新模型的胜率
+        """
+        if self.best_network is None:
+            return 1.0
+        
+        self.network.eval()
+        self.best_network.eval()
+        
+        wins = 0
+        draws = 0
+        
+        # 新模型 vs 最佳模型
+        new_player = MCTSPlayer(self.network, simulations=200, temperature=0)
+        best_player = MCTSPlayer(self.best_network, simulations=200, temperature=0)
+        
+        for game_idx in range(num_games):
+            board = Board()
+            
+            # 交替先后手
+            if game_idx % 2 == 0:
+                players = [new_player, best_player]  # 新模型先手
+                new_color = 1
+            else:
+                players = [best_player, new_player]  # 新模型后手
+                new_color = 2
+            
+            current = 0
+            while not board.is_game_over():
+                action = players[current].get_action(board)
+                x, y = action // 15, action % 15
+                board.move(x, y)
+                current = 1 - current
+            
+            winner = board.get_winner()
+            if winner == new_color:
+                wins += 1
+            elif winner == 0:
+                draws += 1
+        
+        return wins / num_games
+    
     def _save_checkpoint(self, iteration: int) -> None:
         """保存检查点"""
         path = os.path.join(self.model_dir, f'checkpoint_{iteration}.pth')
@@ -280,8 +338,14 @@ class Trainer:
         """更新最佳模型"""
         path = os.path.join(self.model_dir, 'best_model.pth')
         self.network.save(path)
+        
+        # 更新best_network引用（深拷贝当前网络）
+        import copy
+        self.best_network = copy.deepcopy(self.network)
+        self.best_network.eval()
+        
         self.stats['best_model_iteration'] = iteration
-        print(f"更新最佳模型 (迭代 {iteration})")
+        print(f"✓ 更新最佳模型 (迭代 {iteration})")
     
     def _save_stats(self) -> None:
         """保存训练统计信息"""

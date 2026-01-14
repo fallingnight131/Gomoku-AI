@@ -72,6 +72,8 @@ class UndoResponse(BaseModel):
 
 class ModelInfoResponse(BaseModel):
     """模型信息响应"""
+    model_config = {"protected_namespaces": ()}  # 允许 model_ 前缀
+    
     model_loaded: bool
     model_path: str
     parameters: int

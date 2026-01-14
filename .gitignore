@@ -42,6 +42,7 @@ env/
 
 # Data and Models
 backend/models/*.pth
+backend/models/*.json
 backend/data/*.pkl
 backend/data/*.json
 
