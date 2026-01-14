@@ -207,7 +207,8 @@ class SelfPlayWorker:
         self,
         num_games: int,
         num_workers: int = None,
-        augment: bool = True
+        augment: bool = True,
+        progress_callback = None
     ) -> List[Tuple[np.ndarray, np.ndarray, float]]:
         """
         并行进行多局自我对弈
@@ -216,6 +217,7 @@ class SelfPlayWorker:
             num_games: 游戏局数
             num_workers: 并行进程数，默认为CPU核数的一半
             augment: 是否数据增强
+            progress_callback: 进度回调函数，签名 callback(completed, total)
         
         Returns:
             所有游戏的训练数据
@@ -230,8 +232,6 @@ class SelfPlayWorker:
             # 单进程模式
             return self.self_play_games(num_games, augment=augment, verbose=False)
         
-        print(f"  🔄 并行自我对弈: {num_workers} 进程, {num_games} 局")
-        
         # 准备参数
         args = []
         for i in range(num_games):
@@ -244,20 +244,13 @@ class SelfPlayWorker:
                 augment
             ))
         
-        # 并行执行
-        with Pool(num_workers) as pool:
-            results = list(tqdm(
-                pool.imap(_play_one_game_worker, args),
-                total=num_games,
-                desc="  自我对弈",
-                leave=False,
-                unit="局"
-            ))
-        
-        # 合并所有数据
+        # 并行执行，每完成一局就回调更新进度
         all_data = []
-        for game_data in results:
-            all_data.extend(game_data)
+        with Pool(num_workers) as pool:
+            for i, game_data in enumerate(pool.imap(_play_one_game_worker, args)):
+                all_data.extend(game_data)
+                if progress_callback:
+                    progress_callback(i + 1, num_games)
         
         return all_data
 
@@ -371,7 +364,8 @@ def evaluate_games_parallel(
     num_games: int = 10,
     num_workers: int = 1,
     simulations: int = 100,
-    desc: str = "评估"
+    desc: str = "评估",
+    progress_callback = None
 ) -> Tuple[int, int, int]:
     """
     并行执行评估对局
@@ -385,6 +379,7 @@ def evaluate_games_parallel(
         num_workers: 进程数
         simulations: MCTS模拟次数
         desc: 进度条描述
+        progress_callback: 进度回调函数，签名 callback(completed, total, wins, losses, draws)
     
     Returns:
         (胜, 负, 平)
@@ -412,22 +407,17 @@ def evaluate_games_parallel(
     losses = 0
     draws = 0
     
+    # 并行执行，每完成一局就回调更新进度
     with Pool(num_workers) as pool:
-        results = list(tqdm(
-            pool.imap(_evaluate_game_worker, args),
-            total=num_games,
-            desc=desc,
-            leave=False,
-            unit="局"
-        ))
-    
-    for result, _ in results:
-        if result == 1:
-            wins += 1
-        elif result == -1:
-            losses += 1
-        else:
-            draws += 1
+        for i, (result, _) in enumerate(pool.imap(_evaluate_game_worker, args)):
+            if result == 1:
+                wins += 1
+            elif result == -1:
+                losses += 1
+            else:
+                draws += 1
+            if progress_callback:
+                progress_callback(i + 1, num_games, wins, losses, draws)
     
     return wins, losses, draws
 
@@ -493,7 +483,8 @@ class ReplayBuffer:
         with open(path, 'wb') as f:
             pickle.dump(data, f)
         
-        print(f"✓ 经验池已保存: {path} ({len(self.buffer)} 条数据)")
+        from tqdm import tqdm
+        tqdm.write(f"✓ 经验池已保存: {path} ({len(self.buffer)} 条数据)")
     
     def load(self, path: str) -> bool:
         """

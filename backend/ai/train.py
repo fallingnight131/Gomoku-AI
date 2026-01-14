@@ -228,14 +228,29 @@ class Trainer:
         if start_iteration > 0:
             print(f"📌 从迭代 {actual_start} 继续训练，目标迭代 {actual_end - 1}")
         
-        # 总体进度条
-        pbar = tqdm(range(actual_start, actual_end), desc="🎮 训练进度", unit="轮")
+        # 精确计算总局数（考虑 eval_interval）
+        # 评估轮：第1轮 + 每隔 save_interval 的轮
+        eval_random_games = 10
+        num_eval_iterations = 1  # 第1轮
+        for i in range(save_interval, iterations + 1, save_interval):
+            num_eval_iterations += 1
         
-        for iteration in pbar:
+        # 总局数 = 所有轮的自我对弈 + 评估轮的评估对局
+        total_self_play = iterations * episodes_per_iteration
+        total_eval = num_eval_iterations * (eval_random_games + eval_games)
+        total_games_all = total_self_play + total_eval
+        total_iters = iterations  # 总轮数
+        
+        # 总体进度条（在进度条和时间之间显示轮数）
+        pbar = tqdm(total=total_games_all, desc="🎮 训练进度", unit="局",
+                    bar_format='{l_bar}{bar}| {postfix}')
+        
+        for iteration in range(actual_start, actual_end):
             self.stats['iteration'] = iteration
+            # 更新：轮数 + 时间 + 当前阶段
+            pbar.set_postfix_str(f"{iteration}/{total_iters}轮 自我对弈 0/{episodes_per_iteration}局")
             
             # Phase 1: 自我对弈
-            pbar.set_postfix_str("自我对弈中...")
             start_time = time.time()
             
             # 混合模式：自我对弈使用CPU版本的网络
@@ -250,19 +265,30 @@ class Trainer:
                 temp_threshold=10
             )
             
+            # 进度回调：每完成一局更新进度条
+            last_completed = [0]
+            def self_play_progress(completed, total):
+                delta = completed - last_completed[0]
+                last_completed[0] = completed
+                pbar.update(delta)
+                pbar.set_postfix_str(f"自我对弈 {completed}/{total}局")
+            
             # 根据进程数选择并行或串行
             if num_workers > 1:
                 new_data = self_play_worker.self_play_games_parallel(
                     num_games=episodes_per_iteration,
                     num_workers=num_workers,
-                    augment=True
+                    augment=True,
+                    progress_callback=self_play_progress
                 )
             else:
-                new_data = self_play_worker.self_play_games(
-                    num_games=episodes_per_iteration,
-                    augment=True,
-                    verbose=False
-                )
+                # 单进程模式也需要更新进度
+                new_data = []
+                for game_idx in range(episodes_per_iteration):
+                    game_data = self_play_worker.self_play_games(num_games=1, augment=True, verbose=False)
+                    new_data.extend(game_data)
+                    pbar.update(1)
+                    pbar.set_postfix_str(f"自我对弈 {game_idx+1}/{episodes_per_iteration}局")
             
             self.replay_buffer.add(new_data)
             self.stats['total_games'] += episodes_per_iteration
@@ -286,30 +312,54 @@ class Trainer:
             
             elapsed = time.time() - start_time
             avg_loss = np.mean(losses)
-            pbar.set_postfix_str(f"损失: {avg_loss:.4f}")
             
-            # Phase 3: 模型评估
-            if iteration % save_interval == 0 or iteration == 1:
-                pbar.set_postfix_str("评估模型中...")
+            # Phase 3: 模型评估（只在特定轮次执行）
+            is_eval_iteration = (iteration % save_interval == 0 or iteration == 1)
+            
+            # 评估时使用的进程数（与自我对弈共享设置）
+            eval_workers = num_workers if num_workers > 1 else 1
+            
+            if is_eval_iteration:
+                # 实际执行评估
+                # vs 随机
+                last_completed[0] = 0
+                def eval_random_progress(completed, total, wins, losses_count, draws):
+                    delta = completed - last_completed[0]
+                    last_completed[0] = completed
+                    pbar.update(delta)
+                    pbar.set_postfix_str(f"vs随机 {completed}/{total}局 胜{wins}")
                 
-                # 评估时使用的进程数（与自我对弈共享设置）
-                eval_workers = num_workers if num_workers > 1 else 1
-                
-                # 与随机玩家对弈（基础指标，固定10局）
-                win_rate_random = self._evaluate_vs_random(num_games=10, num_workers=eval_workers)
+                win_rate_random = self._evaluate_vs_random(
+                    num_games=eval_random_games, 
+                    num_workers=eval_workers, 
+                    pbar=None,  # 不传pbar，用回调
+                    progress_callback=eval_random_progress
+                )
                 self.stats['win_rate_vs_random'] = win_rate_random
                 
-                # 保存检查点（包含优化器和调度器状态）
+                # 保存检查点
                 self._save_checkpoint(iteration, optimizer, scheduler)
                 
-                # 与当前最佳模型对弈决定是否更新
+                # vs 最佳
                 if self.best_network is None:
-                    # 首次训练，直接保存
+                    # 首次训练，直接保存，跳过vs最佳的进度
+                    pbar.update(eval_games)
                     self._update_best_model(iteration)
                     tqdm.write(f"[迭代 {iteration}] ✓ 初始最佳模型已保存")
                 else:
-                    # 新模型 vs 最佳模型
-                    win_rate_vs_best = self._evaluate_vs_best(num_games=eval_games, num_workers=eval_workers)
+                    last_completed[0] = 0
+                    def eval_best_progress(completed, total, wins, losses_count, draws):
+                        delta = completed - last_completed[0]
+                        last_completed[0] = completed
+                        pbar.update(delta)
+                        pbar.set_postfix_str(f"vs最佳 {completed}/{total}局 胜{wins}")
+                    
+                    win_rate_vs_best = self._evaluate_vs_best(
+                        num_games=eval_games, 
+                        num_workers=eval_workers, 
+                        pbar=None,
+                        progress_callback=eval_best_progress
+                    )
                     
                     if win_rate_vs_best > 0.55:
                         self._update_best_model(iteration)
@@ -317,7 +367,10 @@ class Trainer:
                     else:
                         tqdm.write(f"[迭代 {iteration}] 保留旧模型 (vs随机:{win_rate_random*100:.0f}%, vs最佳:{win_rate_vs_best*100:.0f}%)")
                 
-                pbar.set_postfix_str(f"胜率: {win_rate_random*100:.0f}%")
+                pbar.set_postfix_str(f"✓ 胜率{win_rate_random*100:.0f}%")
+            else:
+                # 非评估轮
+                pbar.set_postfix_str("✓")
             
             # 保存统计信息
             self._save_stats()
@@ -378,13 +431,15 @@ class Trainer:
         
         return losses
     
-    def _evaluate_vs_random(self, num_games: int = 20, num_workers: int = 1) -> float:
+    def _evaluate_vs_random(self, num_games: int = 20, num_workers: int = 1, pbar = None, progress_callback = None) -> float:
         """
         与随机玩家对战评估（使用较少的模拟次数加速）
         
         Args:
             num_games: 评估局数
             num_workers: 并行进程数，>1时启用多进程
+            pbar: 外部进度条对象（可选，用于更新postfix）
+            progress_callback: 进度回调函数（可选，用于细粒度进度更新）
         
         Returns:
             胜率
@@ -395,6 +450,13 @@ class Trainer:
             self.network.to(self.device)  # 恢复到原设备
             network_class = type(self.network).__name__
             
+            # 进度回调：优先使用外部传入的回调
+            def internal_callback(completed, total, wins, losses, draws):
+                if progress_callback:
+                    progress_callback(completed, total, wins, losses, draws)
+                elif pbar:
+                    pbar.set_postfix_str(f"vs随机 {completed}/{total}局 胜{wins}")
+            
             wins, losses, draws = evaluate_games_parallel(
                 network1_state_dict=network_state,
                 network2_state_dict=None,  # None表示随机玩家
@@ -402,7 +464,8 @@ class Trainer:
                 num_games=num_games,
                 num_workers=num_workers,
                 simulations=100,
-                desc="  vs随机"
+                desc="  vs随机",
+                progress_callback=internal_callback
             )
             return wins / num_games
         
@@ -456,18 +519,15 @@ class Trainer:
         
         return wins / num_games
     
-    def _evaluate_vs_best(self, num_games: int = 40, num_workers: int = 1) -> float:
+    def _evaluate_vs_best(self, num_games: int = 20, num_workers: int = 1, pbar = None, progress_callback = None) -> float:
         """
-        与当前最佳模型对战评估（AlphaZero风格 + 自适应评估）
-        
-        自适应策略：
-        - 先20局快速判断
-        - 如果胜率在40%-70%的模糊区间，再补充到40局确认
-        - 这样既保证精度又提升速度
+        与当前最佳模型对战评估（AlphaZero风格）
         
         Args:
-            num_games: 最大评估局数
+            num_games: 评估局数（固定20局）
             num_workers: 并行进程数，>1时启用多进程
+            pbar: 外部进度条对象（可选，用于更新postfix）
+            progress_callback: 进度回调函数（可选，用于细粒度进度更新）
         
         Returns:
             新模型的胜率
@@ -484,44 +544,26 @@ class Trainer:
             network1_class = type(self.network).__name__
             network2_class = type(self.best_network).__name__
             
-            # 先20局快速评估
-            quick_games = 20
+            # 进度回调：优先使用外部传入的回调
+            def internal_callback(completed, total, wins, losses, draws):
+                if progress_callback:
+                    progress_callback(completed, total, wins, losses, draws)
+                elif pbar:
+                    pbar.set_postfix_str(f"vs最佳 {completed}/{total}局 胜{wins}")
+            
             wins, losses, draws = evaluate_games_parallel(
                 network1_state_dict=network_state,
                 network2_state_dict=best_network_state,
                 network1_class=network1_class,
                 network2_class=network2_class,
-                num_games=quick_games,
+                num_games=num_games,
                 num_workers=num_workers,
                 simulations=100,
-                desc="  vs最佳(20局)"
+                desc="  vs最佳",
+                progress_callback=internal_callback
             )
             
-            quick_win_rate = (wins + 0.5 * draws) / quick_games
-            
-            # 如果结果明确，直接返回
-            if quick_win_rate < 0.40 or quick_win_rate > 0.70:
-                return quick_win_rate
-            
-            # 结果不确定，补充到40局
-            remaining = num_games - quick_games
-            if remaining > 0:
-                more_wins, more_losses, more_draws = evaluate_games_parallel(
-                    network1_state_dict=network_state,
-                    network2_state_dict=best_network_state,
-                    network1_class=network1_class,
-                    network2_class=network2_class,
-                    num_games=remaining,
-                    num_workers=num_workers,
-                    simulations=100,
-                    desc="  vs最佳(追加)"
-                )
-                wins += more_wins
-                losses += more_losses
-                draws += more_draws
-            
-            total_games = quick_games + remaining
-            return (wins + 0.5 * draws) / total_games
+            return (wins + 0.5 * draws) / num_games
         
         # 单进程模式（原有逻辑）
         # 混合模式使用CPU网络评估
@@ -539,32 +581,11 @@ class Trainer:
         new_player = MCTSPlayer(eval_network, simulations=100, temperature=0)
         best_player = MCTSPlayer(best_eval_network, simulations=100, temperature=0)
         
-        # 自适应评估：先20局快速评估
-        quick_games = 20
-        
         wins, losses, draws = self._play_evaluation_games(
-            new_player, best_player, quick_games, "  vs最佳(20局)"
+            new_player, best_player, num_games, "  vs最佳"
         )
         
-        quick_win_rate = (wins + 0.5 * draws) / quick_games
-        
-        # 如果结果明确（<40% 或 >70%），直接返回
-        if quick_win_rate < 0.40 or quick_win_rate > 0.70:
-            return quick_win_rate
-        
-        # 结果不确定，补充到40局
-        remaining = num_games - quick_games  # 40 - 20 = 20局
-        if remaining > 0:
-            more_wins, more_losses, more_draws = self._play_evaluation_games(
-                new_player, best_player, remaining, "  vs最佳(追加)"
-            )
-            wins += more_wins
-            losses += more_losses
-            draws += more_draws
-        
-        # 最终胜率
-        total_games = quick_games + remaining
-        win_rate = (wins + 0.5 * draws) / total_games
+        win_rate = (wins + 0.5 * draws) / num_games
         return win_rate
     
     def _play_evaluation_games(
@@ -651,7 +672,7 @@ class Trainer:
             checkpoint['scheduler_state_dict'] = scheduler.state_dict()
         
         torch.save(checkpoint, path)
-        print(f"保存检查点: {path}")
+        tqdm.write(f"保存检查点: {path}")
         
         # 保存经验池到data目录
         buffer_path = os.path.join(self.data_dir, 'replay_buffer.pkl')
@@ -675,7 +696,7 @@ class Trainer:
         self.best_network.eval()
         
         self.stats['best_model_iteration'] = iteration
-        print(f"✓ 更新最佳模型 (迭代 {iteration})")
+        tqdm.write(f"✓ 更新最佳模型 (迭代 {iteration})")
     
     def _save_stats(self) -> None:
         """保存训练统计信息"""
