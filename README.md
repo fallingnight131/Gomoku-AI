@@ -103,9 +103,19 @@ npm run dev
 
 ## 🧠 训练AI
 
-### 快速训练（测试）
+### 🚀 快速测试（1-2分钟）
 
-使用小型网络快速验证训练流程：
+验证训练流程是否正常：
+
+```bash
+cd backend
+conda activate gomoku
+python -m ai.train --iterations 1 --episodes 2 --simulations 50 --small-network
+```
+
+### ⚡ 轻量训练（10-30分钟）
+
+使用小型网络快速训练，适合开发调试：
 
 ```bash
 cd backend
@@ -113,12 +123,34 @@ conda activate gomoku
 python -m ai.train --iterations 10 --episodes 5 --simulations 100 --small-network
 ```
 
-### 完整训练
+### 🔥 标准训练（2-4小时）
+
+平衡训练效果与时间：
 
 ```bash
 cd backend
 conda activate gomoku
-python -m ai.train --iterations 100 --episodes 100 --simulations 800
+python -m ai.train --iterations 50 --episodes 20 --simulations 400
+```
+
+### 💪 完整训练（8-24小时）
+
+获得最佳棋力，建议使用GPU：
+
+```bash
+cd backend
+conda activate gomoku
+python -m ai.train --iterations 100 --episodes 50 --simulations 800
+```
+
+### 🏆 极限训练（2-7天）
+
+追求最强棋力，需要GPU加速：
+
+```bash
+cd backend
+conda activate gomoku
+python -m ai.train --iterations 200 --episodes 200 --simulations 1600
 ```
 
 ### 训练参数说明
