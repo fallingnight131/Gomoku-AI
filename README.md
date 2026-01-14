@@ -167,6 +167,7 @@ python -m ai.train --iterations 200 --episodes 200 --simulations 1600
 | `--small-network` | - | 使用小型网络(5层) |
 | `--device` | auto | 计算设备(auto/cpu/cuda) |
 | `--resume` | - | 从检查点恢复训练 |
+| `--eval-interval` | 5 | 评估间隔(每N轮评估一次) |
 
 ### 使用GPU训练
 

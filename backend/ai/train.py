@@ -46,10 +46,19 @@ class Trainer:
         
         # 设置设备
         if device == 'auto':
-            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            if torch.cuda.is_available():
+                self.device = 'cuda'
+                device_name = torch.cuda.get_device_name(0)
+                print(f"🚀 使用设备: GPU ({device_name})")
+            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                self.device = 'mps'
+                print(f"🚀 使用设备: Apple Silicon GPU (MPS)")
+            else:
+                self.device = 'cpu'
+                print(f"💻 使用设备: CPU (训练较慢，建议使用GPU)")
         else:
             self.device = device
-        print(f"使用设备: {self.device}")
+            print(f"使用设备: {self.device}")
         
         # 创建网络
         if use_small_network:
@@ -60,8 +69,9 @@ class Trainer:
         self.network.to(self.device)
         print(f"网络参数量: {self.network.count_parameters():,}")
         
-        # 最佳模型
+        # 最佳模型 - 尝试加载已有的best_model
         self.best_network: Optional[PolicyValueNetwork] = None
+        self._load_best_model_if_exists(use_small_network)
         
         # 经验回放缓冲区
         self.replay_buffer = ReplayBuffer(max_size=50000)
@@ -74,6 +84,35 @@ class Trainer:
             'losses': [],
             'best_model_iteration': 0
         }
+    
+    def _load_best_model_if_exists(self, use_small_network: bool) -> None:
+        """尝试加载已有的最佳模型"""
+        best_path = os.path.join(self.model_dir, 'best_model.pth')
+        if os.path.exists(best_path):
+            try:
+                checkpoint = torch.load(best_path, map_location=self.device)
+                
+                # 根据保存的配置创建网络
+                num_blocks = checkpoint.get('num_res_blocks', 10)
+                num_channels = checkpoint.get('num_channels', 64)
+                
+                if num_blocks <= 5 or use_small_network:
+                    self.best_network = PolicyValueNetworkSmall()
+                else:
+                    self.best_network = PolicyValueNetwork(
+                        num_channels=num_channels,
+                        num_res_blocks=num_blocks
+                    )
+                
+                self.best_network.load_state_dict(checkpoint['model_state_dict'])
+                self.best_network.to(self.device)
+                self.best_network.eval()
+                print(f"✓ 加载已有最佳模型: {best_path}")
+            except Exception as e:
+                print(f"⚠ 无法加载已有模型: {e}，将从头开始训练")
+                self.best_network = None
+        else:
+            print("未找到已有最佳模型，将从头开始训练")
     
     def train(
         self,
@@ -296,6 +335,7 @@ class Trainer:
         self.best_network.eval()
         
         wins = 0
+        losses = 0
         draws = 0
         
         # 新模型 vs 最佳模型
@@ -325,8 +365,12 @@ class Trainer:
                 wins += 1
             elif winner == 0:
                 draws += 1
+            else:
+                losses += 1
         
-        return wins / num_games
+        # 胜率 = 胜 / 总局数，平局算0.5胜
+        win_rate = (wins + 0.5 * draws) / num_games
+        return win_rate
     
     def _save_checkpoint(self, iteration: int) -> None:
         """保存检查点"""
@@ -339,9 +383,16 @@ class Trainer:
         path = os.path.join(self.model_dir, 'best_model.pth')
         self.network.save(path)
         
-        # 更新best_network引用（深拷贝当前网络）
-        import copy
-        self.best_network = copy.deepcopy(self.network)
+        # 从文件加载创建新的best_network（比deepcopy更可靠）
+        # 根据当前网络的残差块数量判断类型
+        num_blocks = len(self.network.res_blocks)
+        if num_blocks <= 5:
+            self.best_network = PolicyValueNetworkSmall()
+        else:
+            self.best_network = PolicyValueNetwork()
+        
+        self.best_network.load_state_dict(self.network.state_dict())
+        self.best_network.to(self.device)
         self.best_network.eval()
         
         self.stats['best_model_iteration'] = iteration
@@ -383,6 +434,7 @@ def main():
     parser.add_argument('--small-network', action='store_true', help='使用小型网络')
     parser.add_argument('--device', type=str, default='auto', help='计算设备')
     parser.add_argument('--resume', type=str, default=None, help='从检查点恢复')
+    parser.add_argument('--eval-interval', type=int, default=5, help='评估间隔(每N轮评估一次)')
     
     args = parser.parse_args()
     
@@ -405,6 +457,7 @@ def main():
         batch_size=args.batch_size,
         epochs_per_iteration=args.epochs,
         lr=args.lr,
+        save_interval=args.eval_interval,
         verbose=True
     )
 
