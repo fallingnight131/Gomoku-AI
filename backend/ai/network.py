@@ -160,11 +160,10 @@ class PolicyValueNetwork(nn.Module):
         """
         self.eval()
         with torch.no_grad():
-            # 添加batch维度
+            # 添加batch维度，并移动到模型所在设备
             x = torch.FloatTensor(state).unsqueeze(0)
-            
-            if next(self.parameters()).is_cuda:
-                x = x.cuda()
+            device = next(self.parameters()).device
+            x = x.to(device)
             
             log_probs, value = self.forward(x)
             probs = torch.exp(log_probs).squeeze(0).cpu().numpy()
@@ -186,9 +185,8 @@ class PolicyValueNetwork(nn.Module):
         self.eval()
         with torch.no_grad():
             x = torch.FloatTensor(states)
-            
-            if next(self.parameters()).is_cuda:
-                x = x.cuda()
+            device = next(self.parameters()).device
+            x = x.to(device)
             
             log_probs, values = self.forward(x)
             probs = torch.exp(log_probs).cpu().numpy()

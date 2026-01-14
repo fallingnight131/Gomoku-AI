@@ -14,13 +14,14 @@ import json
 from typing import Optional, Dict, List, Tuple
 from datetime import datetime
 import sys
+from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from game.board import Board
 from ai.network import PolicyValueNetwork, PolicyValueNetworkSmall
 from ai.mcts import MCTS, MCTSPlayer, RandomPlayer
-from ai.self_play import SelfPlayWorker, ReplayBuffer
+from ai.self_play import SelfPlayWorker, ReplayBuffer, evaluate_games_parallel
 
 
 class Trainer:
@@ -39,25 +40,47 @@ class Trainer:
         Args:
             model_dir: 模型保存目录
             use_small_network: 是否使用小型网络
-            device: 计算设备 ('auto', 'cpu', 'cuda')
+            device: 计算设备 ('auto', 'cpu', 'cuda', 'hybrid')
+                   'hybrid' = GPU训练 + CPU自我对弈/评估（推荐有GPU时使用）
         """
         self.model_dir = model_dir
         os.makedirs(model_dir, exist_ok=True)
+        self.use_small_network = use_small_network
         
         # 设置设备
-        if device == 'auto':
+        self.hybrid_mode = (device == 'hybrid')
+        
+        if device == 'hybrid':
+            # 混合模式：GPU训练，CPU推理
+            if torch.cuda.is_available():
+                self.device = 'cuda'
+                self.inference_device = 'cpu'
+                device_name = torch.cuda.get_device_name(0)
+                print(f"🚀 混合模式: GPU训练 ({device_name}) + CPU自我对弈/评估")
+            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                self.device = 'mps'
+                self.inference_device = 'cpu'
+                print(f"🚀 混合模式: MPS训练 + CPU自我对弈/评估")
+            else:
+                self.device = 'cpu'
+                self.inference_device = 'cpu'
+                self.hybrid_mode = False
+                print(f"💻 使用设备: CPU (未检测到GPU，无法使用混合模式)")
+        elif device == 'auto':
             if torch.cuda.is_available():
                 self.device = 'cuda'
                 device_name = torch.cuda.get_device_name(0)
                 print(f"🚀 使用设备: GPU ({device_name})")
-            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                self.device = 'mps'
-                print(f"🚀 使用设备: Apple Silicon GPU (MPS)")
             else:
                 self.device = 'cpu'
-                print(f"💻 使用设备: CPU (训练较慢，建议使用GPU)")
+                if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                    print(f"💻 使用设备: CPU (提示: 检测到MPS可用但MCTS场景下CPU更快)")
+                else:
+                    print(f"💻 使用设备: CPU")
+            self.inference_device = self.device
         else:
             self.device = device
+            self.inference_device = device
             print(f"使用设备: {self.device}")
         
         # 创建网络
@@ -84,6 +107,36 @@ class Trainer:
             'losses': [],
             'best_model_iteration': 0
         }
+    
+    def _get_cpu_network(self) -> PolicyValueNetwork:
+        """
+        获取CPU版本的网络（用于自我对弈和评估）
+        将当前训练网络的权重复制到CPU网络
+        """
+        if self.use_small_network:
+            cpu_network = PolicyValueNetworkSmall()
+        else:
+            cpu_network = PolicyValueNetwork()
+        
+        cpu_network.load_state_dict(self.network.state_dict())
+        cpu_network.to('cpu')
+        cpu_network.eval()
+        return cpu_network
+    
+    def _get_cpu_best_network(self) -> Optional[PolicyValueNetwork]:
+        """获取CPU版本的最佳网络"""
+        if self.best_network is None:
+            return None
+        
+        if self.use_small_network:
+            cpu_network = PolicyValueNetworkSmall()
+        else:
+            cpu_network = PolicyValueNetwork()
+        
+        cpu_network.load_state_dict(self.best_network.state_dict())
+        cpu_network.to('cpu')
+        cpu_network.eval()
+        return cpu_network
     
     def _load_best_model_if_exists(self, use_small_network: bool) -> None:
         """尝试加载已有的最佳模型"""
@@ -126,6 +179,7 @@ class Trainer:
         lr_decay_steps: int = 50,
         eval_games: int = 20,
         save_interval: int = 5,
+        num_workers: int = 1,
         verbose: bool = True
     ):
         """
@@ -142,43 +196,58 @@ class Trainer:
             lr_decay_steps: 学习率衰减步数
             eval_games: 评估对局数
             save_interval: 保存间隔
+            num_workers: 并行自我对弈的进程数 (1=不并行)
             verbose: 是否打印详细信息
         """
         # 优化器
         optimizer = optim.Adam(self.network.parameters(), lr=lr, weight_decay=1e-4)
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=lr_decay_steps, gamma=lr_decay)
         
-        for iteration in range(1, iterations + 1):
+        # 总体进度条
+        pbar = tqdm(range(1, iterations + 1), desc="🎮 训练进度", unit="轮")
+        
+        for iteration in pbar:
             self.stats['iteration'] = iteration
-            print(f"\n{'='*60}")
-            print(f"迭代 {iteration}/{iterations}")
-            print(f"{'='*60}")
             
             # Phase 1: 自我对弈
-            print("\n[Phase 1] 自我对弈生成数据...")
+            pbar.set_postfix_str("自我对弈中...")
             start_time = time.time()
             
+            # 混合模式：自我对弈使用CPU版本的网络
+            if self.hybrid_mode:
+                inference_network = self._get_cpu_network()
+            else:
+                inference_network = self.network
+            
             self_play_worker = SelfPlayWorker(
-                self.network,
+                inference_network,
                 simulations=simulations,
                 temp_threshold=10
             )
             
-            new_data = self_play_worker.self_play_games(
-                num_games=episodes_per_iteration,
-                augment=True,
-                verbose=verbose
-            )
+            # 根据进程数选择并行或串行
+            if num_workers > 1:
+                new_data = self_play_worker.self_play_games_parallel(
+                    num_games=episodes_per_iteration,
+                    num_workers=num_workers,
+                    augment=True
+                )
+            else:
+                new_data = self_play_worker.self_play_games(
+                    num_games=episodes_per_iteration,
+                    augment=True,
+                    verbose=False
+                )
             
             self.replay_buffer.add(new_data)
             self.stats['total_games'] += episodes_per_iteration
             
             elapsed = time.time() - start_time
-            print(f"生成 {len(new_data)} 样本, 用时 {elapsed:.1f}s")
-            print(f"缓冲区大小: {len(self.replay_buffer)}")
+            if verbose:
+                tqdm.write(f"[迭代 {iteration}] 自我对弈: {len(new_data)} 样本, {elapsed:.1f}s")
             
             # Phase 2: 网络训练
-            print("\n[Phase 2] 训练神经网络...")
+            pbar.set_postfix_str("训练网络中...")
             start_time = time.time()
             
             losses = self._train_network(
@@ -192,17 +261,18 @@ class Trainer:
             
             elapsed = time.time() - start_time
             avg_loss = np.mean(losses)
-            print(f"平均损失: {avg_loss:.4f}, 用时 {elapsed:.1f}s")
-            print(f"当前学习率: {scheduler.get_last_lr()[0]:.6f}")
+            pbar.set_postfix_str(f"损失: {avg_loss:.4f}")
             
             # Phase 3: 模型评估
             if iteration % save_interval == 0 or iteration == 1:
-                print("\n[Phase 3] 评估模型...")
+                pbar.set_postfix_str("评估模型中...")
                 
-                # 与随机玩家对弈（基础指标）
-                win_rate_random = self._evaluate_vs_random(num_games=eval_games)
+                # 评估时使用的进程数（与自我对弈共享设置）
+                eval_workers = num_workers if num_workers > 1 else 1
+                
+                # 与随机玩家对弈（基础指标，固定10局）
+                win_rate_random = self._evaluate_vs_random(num_games=10, num_workers=eval_workers)
                 self.stats['win_rate_vs_random'] = win_rate_random
-                print(f"对随机玩家胜率: {win_rate_random*100:.1f}%")
                 
                 # 保存检查点
                 self._save_checkpoint(iteration)
@@ -211,20 +281,26 @@ class Trainer:
                 if self.best_network is None:
                     # 首次训练，直接保存
                     self._update_best_model(iteration)
+                    tqdm.write(f"[迭代 {iteration}] ✓ 初始最佳模型已保存")
                 else:
                     # 新模型 vs 最佳模型
-                    win_rate_vs_best = self._evaluate_vs_best(num_games=eval_games)
-                    print(f"对最佳模型胜率: {win_rate_vs_best*100:.1f}%")
+                    win_rate_vs_best = self._evaluate_vs_best(num_games=eval_games, num_workers=eval_workers)
                     
                     if win_rate_vs_best > 0.55:
                         self._update_best_model(iteration)
+                        tqdm.write(f"[迭代 {iteration}] ✓ 更新最佳模型 (vs随机:{win_rate_random*100:.0f}%, vs最佳:{win_rate_vs_best*100:.0f}%)")
                     else:
-                        print(f"未超过阈值(55%)，保留当前最佳模型")
+                        tqdm.write(f"[迭代 {iteration}] 保留旧模型 (vs随机:{win_rate_random*100:.0f}%, vs最佳:{win_rate_vs_best*100:.0f}%)")
+                
+                pbar.set_postfix_str(f"胜率: {win_rate_random*100:.0f}%")
             
             # 保存统计信息
             self._save_stats()
         
-        print("\n训练完成!")
+        pbar.close()
+        print(f"\n{'='*60}")
+        print("🎉 训练完成!")
+        print(f"{'='*60}")
         print(f"总游戏数: {self.stats['total_games']}")
         print(f"最终对随机玩家胜率: {self.stats['win_rate_vs_random']*100:.1f}%")
     
@@ -277,21 +353,52 @@ class Trainer:
         
         return losses
     
-    def _evaluate_vs_random(self, num_games: int = 20) -> float:
+    def _evaluate_vs_random(self, num_games: int = 20, num_workers: int = 1) -> float:
         """
-        与随机玩家对战评估
+        与随机玩家对战评估（使用较少的模拟次数加速）
+        
+        Args:
+            num_games: 评估局数
+            num_workers: 并行进程数，>1时启用多进程
         
         Returns:
             胜率
         """
-        self.network.eval()
+        # 多进程模式
+        if num_workers > 1:
+            network_state = self.network.cpu().state_dict()
+            self.network.to(self.device)  # 恢复到原设备
+            network_class = type(self.network).__name__
+            
+            wins, losses, draws = evaluate_games_parallel(
+                network1_state_dict=network_state,
+                network2_state_dict=None,  # None表示随机玩家
+                network_class=network_class,
+                num_games=num_games,
+                num_workers=num_workers,
+                simulations=100,
+                desc="  vs随机"
+            )
+            return wins / num_games
+        
+        # 单进程模式（原有逻辑）
+        # 混合模式使用CPU网络评估
+        if self.hybrid_mode:
+            eval_network = self._get_cpu_network()
+        else:
+            self.network.eval()
+            eval_network = self.network
+        
         wins = 0
         draws = 0
         
-        mcts_player = MCTSPlayer(self.network, simulations=200, temperature=0)
+        # 评估时使用较少的模拟次数（100次 vs 训练时的更多次数）
+        # 因为随机玩家很弱，不需要太强的搜索
+        mcts_player = MCTSPlayer(eval_network, simulations=100, temperature=0)
         random_player = RandomPlayer()
         
-        for game_idx in range(num_games):
+        pbar = tqdm(range(num_games), desc="  vs随机", leave=False, unit="局")
+        for game_idx in pbar:
             board = Board()
             
             # 交替先后手
@@ -318,12 +425,24 @@ class Trainer:
                 wins += 1
             elif winner == 0:
                 draws += 1
+            
+            pbar.set_postfix_str(f"胜{wins}")
+        pbar.close()
         
         return wins / num_games
     
-    def _evaluate_vs_best(self, num_games: int = 20) -> float:
+    def _evaluate_vs_best(self, num_games: int = 40, num_workers: int = 1) -> float:
         """
-        与当前最佳模型对战评估（AlphaZero风格）
+        与当前最佳模型对战评估（AlphaZero风格 + 自适应评估）
+        
+        自适应策略：
+        - 先20局快速判断
+        - 如果胜率在40%-70%的模糊区间，再补充到40局确认
+        - 这样既保证精度又提升速度
+        
+        Args:
+            num_games: 最大评估局数
+            num_workers: 并行进程数，>1时启用多进程
         
         Returns:
             新模型的胜率
@@ -331,27 +450,123 @@ class Trainer:
         if self.best_network is None:
             return 1.0
         
-        self.network.eval()
-        self.best_network.eval()
+        # 多进程模式
+        if num_workers > 1:
+            network_state = self.network.cpu().state_dict()
+            best_network_state = self.best_network.cpu().state_dict()
+            self.network.to(self.device)  # 恢复到原设备
+            self.best_network.to(self.device)
+            network_class = type(self.network).__name__
+            
+            # 先20局快速评估
+            quick_games = 20
+            wins, losses, draws = evaluate_games_parallel(
+                network1_state_dict=network_state,
+                network2_state_dict=best_network_state,
+                network_class=network_class,
+                num_games=quick_games,
+                num_workers=num_workers,
+                simulations=100,
+                desc="  vs最佳(20局)"
+            )
+            
+            quick_win_rate = (wins + 0.5 * draws) / quick_games
+            
+            # 如果结果明确，直接返回
+            if quick_win_rate < 0.40 or quick_win_rate > 0.70:
+                return quick_win_rate
+            
+            # 结果不确定，补充到40局
+            remaining = num_games - quick_games
+            if remaining > 0:
+                more_wins, more_losses, more_draws = evaluate_games_parallel(
+                    network1_state_dict=network_state,
+                    network2_state_dict=best_network_state,
+                    network_class=network_class,
+                    num_games=remaining,
+                    num_workers=num_workers,
+                    simulations=100,
+                    desc="  vs最佳(追加)"
+                )
+                wins += more_wins
+                losses += more_losses
+                draws += more_draws
+            
+            total_games = quick_games + remaining
+            return (wins + 0.5 * draws) / total_games
         
+        # 单进程模式（原有逻辑）
+        # 混合模式使用CPU网络评估
+        if self.hybrid_mode:
+            eval_network = self._get_cpu_network()
+            best_eval_network = self._get_cpu_best_network()
+        else:
+            self.network.eval()
+            self.best_network.eval()
+            eval_network = self.network
+            best_eval_network = self.best_network
+        
+        # 新模型 vs 最佳模型
+        # 评估时使用100次模拟（比训练时少，但足够判断强弱）
+        new_player = MCTSPlayer(eval_network, simulations=100, temperature=0)
+        best_player = MCTSPlayer(best_eval_network, simulations=100, temperature=0)
+        
+        # 自适应评估：先20局快速评估
+        quick_games = 20
+        
+        wins, losses, draws = self._play_evaluation_games(
+            new_player, best_player, quick_games, "  vs最佳(20局)"
+        )
+        
+        quick_win_rate = (wins + 0.5 * draws) / quick_games
+        
+        # 如果结果明确（<40% 或 >70%），直接返回
+        if quick_win_rate < 0.40 or quick_win_rate > 0.70:
+            return quick_win_rate
+        
+        # 结果不确定，补充到40局
+        remaining = num_games - quick_games  # 40 - 20 = 20局
+        if remaining > 0:
+            more_wins, more_losses, more_draws = self._play_evaluation_games(
+                new_player, best_player, remaining, "  vs最佳(追加)"
+            )
+            wins += more_wins
+            losses += more_losses
+            draws += more_draws
+        
+        # 最终胜率
+        total_games = quick_games + remaining
+        win_rate = (wins + 0.5 * draws) / total_games
+        return win_rate
+    
+    def _play_evaluation_games(
+        self, 
+        player1: MCTSPlayer, 
+        player2: MCTSPlayer, 
+        num_games: int,
+        desc: str
+    ) -> Tuple[int, int, int]:
+        """
+        执行评估对局
+        
+        Returns:
+            (player1胜, player1负, 平局)
+        """
         wins = 0
         losses = 0
         draws = 0
         
-        # 新模型 vs 最佳模型
-        new_player = MCTSPlayer(self.network, simulations=200, temperature=0)
-        best_player = MCTSPlayer(self.best_network, simulations=200, temperature=0)
-        
-        for game_idx in range(num_games):
+        pbar = tqdm(range(num_games), desc=desc, leave=False, unit="局")
+        for game_idx in pbar:
             board = Board()
             
             # 交替先后手
             if game_idx % 2 == 0:
-                players = [new_player, best_player]  # 新模型先手
-                new_color = 1
+                players = [player1, player2]  # player1先手
+                p1_color = 1
             else:
-                players = [best_player, new_player]  # 新模型后手
-                new_color = 2
+                players = [player2, player1]  # player1后手
+                p1_color = 2
             
             current = 0
             while not board.is_game_over():
@@ -361,16 +576,17 @@ class Trainer:
                 current = 1 - current
             
             winner = board.get_winner()
-            if winner == new_color:
+            if winner == p1_color:
                 wins += 1
             elif winner == 0:
                 draws += 1
             else:
                 losses += 1
+            
+            pbar.set_postfix_str(f"{wins}胜{losses}负")
+        pbar.close()
         
-        # 胜率 = 胜 / 总局数，平局算0.5胜
-        win_rate = (wins + 0.5 * draws) / num_games
-        return win_rate
+        return wins, losses, draws
     
     def _save_checkpoint(self, iteration: int) -> None:
         """保存检查点"""
@@ -435,6 +651,7 @@ def main():
     parser.add_argument('--device', type=str, default='auto', help='计算设备')
     parser.add_argument('--resume', type=str, default=None, help='从检查点恢复')
     parser.add_argument('--eval-interval', type=int, default=5, help='评估间隔(每N轮评估一次)')
+    parser.add_argument('--workers', type=int, default=1, help='并行自我对弈进程数 (1=不并行)')
     
     args = parser.parse_args()
     
@@ -458,6 +675,7 @@ def main():
         epochs_per_iteration=args.epochs,
         lr=args.lr,
         save_interval=args.eval_interval,
+        num_workers=args.workers,
         verbose=True
     )
 

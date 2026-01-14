@@ -9,6 +9,9 @@ from dataclasses import dataclass
 import time
 import sys
 import os
+from tqdm import tqdm
+from multiprocessing import Pool, cpu_count
+import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -102,12 +105,13 @@ class SelfPlayWorker:
         self.c_puct = c_puct
         self.temp_threshold = temp_threshold
     
-    def self_play_one_game(self, verbose: bool = False) -> GameRecord:
+    def self_play_one_game(self, verbose: bool = False, pbar=None) -> GameRecord:
         """
         进行一局自我对弈
         
         Args:
             verbose: 是否打印详细信息
+            pbar: tqdm进度条对象，用于实时更新步数
         
         Returns:
             游戏记录
@@ -147,10 +151,14 @@ class SelfPlayWorker:
             x, y = action // board.size, action % board.size
             board.move(x, y)
             
-            if verbose:
-                print(f"Step {step + 1}: Player {3 - board.current_player} -> ({x}, {y})")
-            
             step += 1
+            
+            # 实时更新进度条显示当前步数
+            if pbar is not None:
+                pbar.set_postfix_str(f"第{step}步")
+            elif verbose:
+                print(f"Step {step}: Player {3 - board.current_player} -> ({x}, {y})")
+            
         
         winner = board.get_winner()
         
@@ -183,22 +191,238 @@ class SelfPlayWorker:
         """
         all_data = []
         
-        for i in range(num_games):
-            start_time = time.time()
-            
-            record = self.self_play_one_game(verbose=False)
+        pbar = tqdm(range(num_games), desc="  自我对弈", leave=False, unit="局")
+        for i in pbar:
+            record = self.self_play_one_game(verbose=False, pbar=pbar)
             game_data = record.to_training_data(augment=augment)
             all_data.extend(game_data)
             
-            elapsed = time.time() - start_time
-            
-            if verbose:
-                winner_str = 'Black' if record.winner == 1 else 'White' if record.winner == 2 else 'Draw'
-                print(f"Game {i + 1}/{num_games}: {len(record.states)} moves, "
-                      f"Winner: {winner_str}, Time: {elapsed:.1f}s, "
-                      f"Data: {len(game_data)} samples")
+            winner_str = '黑胜' if record.winner == 1 else '白胜' if record.winner == 2 else '平'
+            pbar.set_postfix_str(f"{winner_str} {len(record.states)}步")
+        
+        pbar.close()
+        return all_data
+    
+    def self_play_games_parallel(
+        self,
+        num_games: int,
+        num_workers: int = None,
+        augment: bool = True
+    ) -> List[Tuple[np.ndarray, np.ndarray, float]]:
+        """
+        并行进行多局自我对弈
+        
+        Args:
+            num_games: 游戏局数
+            num_workers: 并行进程数，默认为CPU核数的一半
+            augment: 是否数据增强
+        
+        Returns:
+            所有游戏的训练数据
+        """
+        if num_workers is None:
+            num_workers = max(1, cpu_count() // 2)
+        
+        # 限制worker数量不超过游戏数
+        num_workers = min(num_workers, num_games)
+        
+        if num_workers <= 1:
+            # 单进程模式
+            return self.self_play_games(num_games, augment=augment, verbose=False)
+        
+        print(f"  🔄 并行自我对弈: {num_workers} 进程, {num_games} 局")
+        
+        # 准备参数
+        args = []
+        for i in range(num_games):
+            args.append((
+                self.network.state_dict(),
+                type(self.network).__name__,
+                self.simulations,
+                self.c_puct,
+                self.temp_threshold,
+                augment
+            ))
+        
+        # 并行执行
+        with Pool(num_workers) as pool:
+            results = list(tqdm(
+                pool.imap(_play_one_game_worker, args),
+                total=num_games,
+                desc="  自我对弈",
+                leave=False,
+                unit="局"
+            ))
+        
+        # 合并所有数据
+        all_data = []
+        for game_data in results:
+            all_data.extend(game_data)
         
         return all_data
+
+
+def _play_one_game_worker(args) -> List[Tuple[np.ndarray, np.ndarray, float]]:
+    """
+    单个自我对弈的worker函数（用于多进程）
+    
+    Args:
+        args: (network_state_dict, network_class_name, simulations, c_puct, temp_threshold, augment)
+    
+    Returns:
+        一局游戏的训练数据
+    """
+    state_dict, network_class, simulations, c_puct, temp_threshold, augment = args
+    
+    # 在子进程中重建网络
+    from ai.network import PolicyValueNetwork, PolicyValueNetworkSmall
+    
+    if network_class == 'PolicyValueNetworkSmall':
+        network = PolicyValueNetworkSmall()
+    else:
+        network = PolicyValueNetwork()
+    
+    network.load_state_dict(state_dict)
+    network.eval()
+    
+    # 创建worker并执行一局游戏
+    worker = SelfPlayWorker(network, simulations=simulations, c_puct=c_puct, temp_threshold=temp_threshold)
+    record = worker.self_play_one_game(verbose=False)
+    
+    return record.to_training_data(augment=augment)
+
+
+def _evaluate_game_worker(args) -> Tuple[int, int]:
+    """
+    评估对局的worker函数（用于多进程）
+    
+    Args:
+        args: (network1_state_dict, network2_state_dict, network_class, 
+               simulations, game_idx, is_vs_random)
+        network2_state_dict: None表示对手是随机玩家
+    
+    Returns:
+        (player1结果, game_idx)
+        结果: 1=胜, 0=平, -1=负
+    """
+    (network1_state, network2_state, network_class, 
+     simulations, game_idx, is_vs_random) = args
+    
+    from ai.network import PolicyValueNetwork, PolicyValueNetworkSmall
+    from ai.mcts import MCTSPlayer, RandomPlayer
+    from game.board import Board
+    
+    # 创建网络1
+    if network_class == 'PolicyValueNetworkSmall':
+        network1 = PolicyValueNetworkSmall()
+    else:
+        network1 = PolicyValueNetwork()
+    network1.load_state_dict(network1_state)
+    network1.eval()
+    
+    player1 = MCTSPlayer(network1, simulations=simulations, temperature=0)
+    
+    # 创建对手
+    if is_vs_random:
+        player2 = RandomPlayer()
+    else:
+        if network_class == 'PolicyValueNetworkSmall':
+            network2 = PolicyValueNetworkSmall()
+        else:
+            network2 = PolicyValueNetwork()
+        network2.load_state_dict(network2_state)
+        network2.eval()
+        player2 = MCTSPlayer(network2, simulations=simulations, temperature=0)
+    
+    # 开始对局
+    board = Board()
+    
+    # 交替先后手
+    if game_idx % 2 == 0:
+        players = [player1, player2]  # player1先手
+        p1_color = 1
+    else:
+        players = [player2, player1]  # player1后手
+        p1_color = 2
+    
+    current = 0
+    while not board.is_game_over():
+        action = players[current].get_action(board)
+        x, y = action // 15, action % 15
+        board.move(x, y)
+        current = 1 - current
+    
+    winner = board.get_winner()
+    if winner == p1_color:
+        result = 1  # 胜
+    elif winner == 0:
+        result = 0  # 平
+    else:
+        result = -1  # 负
+    
+    return (result, game_idx)
+
+
+def evaluate_games_parallel(
+    network1_state_dict: dict,
+    network2_state_dict: Optional[dict],
+    network_class: str,
+    num_games: int,
+    num_workers: int,
+    simulations: int = 100,
+    desc: str = "评估"
+) -> Tuple[int, int, int]:
+    """
+    并行执行评估对局
+    
+    Args:
+        network1_state_dict: 网络1参数
+        network2_state_dict: 网络2参数，None表示对手是随机玩家
+        network_class: 网络类名
+        num_games: 对局数
+        num_workers: 进程数
+        simulations: MCTS模拟次数
+        desc: 进度条描述
+    
+    Returns:
+        (胜, 负, 平)
+    """
+    is_vs_random = network2_state_dict is None
+    
+    # 准备参数
+    args = []
+    for i in range(num_games):
+        args.append((
+            network1_state_dict,
+            network2_state_dict,
+            network_class,
+            simulations,
+            i,
+            is_vs_random
+        ))
+    
+    wins = 0
+    losses = 0
+    draws = 0
+    
+    with Pool(num_workers) as pool:
+        results = list(tqdm(
+            pool.imap(_evaluate_game_worker, args),
+            total=num_games,
+            desc=desc,
+            leave=False,
+            unit="局"
+        ))
+    
+    for result, _ in results:
+        if result == 1:
+            wins += 1
+        elif result == -1:
+            losses += 1
+        else:
+            draws += 1
+    
+    return wins, losses, draws
 
 
 class ReplayBuffer:
