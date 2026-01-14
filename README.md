@@ -162,7 +162,7 @@ python -m ai.train --iterations 200 --episodes 200 --simulations 1600
 | `--simulations` | 400 | 每步MCTS模拟次数 |
 | `--batch-size` | 256 | 训练批次大小 |
 | `--epochs` | 5 | 每轮训练epoch数 |
-| `--lr` | 0.001 | 初始学习率 |
+| `--lr` | 0.001 | 初始学习率（余弦退火起点） |
 | `--model-dir` | models | 模型保存目录 |
 | `--small-network` | - | 使用小型网络(5层) |
 | `--device` | auto | 计算设备(auto/cpu/cuda/hybrid) |
@@ -170,6 +170,8 @@ python -m ai.train --iterations 200 --episodes 200 --simulations 1600
 | `--resume` | - | 从指定检查点恢复训练 |
 | `--auto-resume` | - | 自动从最新检查点恢复 |
 | `--eval-interval` | 5 | 评估间隔(每N轮评估一次) |
+
+**学习率调度**：采用余弦退火（Cosine Annealing），学习率从 `--lr` 平滑衰减到 1e-5，避免阶梯式衰减的突变。
 
 ### 🚀 多核并行训练（推荐）
 

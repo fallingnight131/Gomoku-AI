@@ -179,8 +179,7 @@ class Trainer:
         batch_size: int = 256,
         epochs_per_iteration: int = 5,
         lr: float = 0.001,
-        lr_decay: float = 0.1,
-        lr_decay_steps: int = 50,
+        lr_min: float = 1e-5,
         eval_games: int = 20,
         save_interval: int = 5,
         num_workers: int = 1,
@@ -199,8 +198,7 @@ class Trainer:
             batch_size: 训练批次大小
             epochs_per_iteration: 每轮训练epoch数
             lr: 初始学习率
-            lr_decay: 学习率衰减因子
-            lr_decay_steps: 学习率衰减步数
+            lr_min: 最低学习率（余弦退火终点）
             eval_games: 评估对局数
             save_interval: 保存间隔
             num_workers: 并行自我对弈的进程数 (1=不并行)
@@ -209,9 +207,11 @@ class Trainer:
             optimizer_state: 优化器状态（用于断点续训）
             scheduler_state: 调度器状态（用于断点续训）
         """
-        # 优化器
+        # 优化器（余弦退火调度器，学习率从 lr 平滑衰减到 lr_min）
         optimizer = optim.Adam(self.network.parameters(), lr=lr, weight_decay=1e-4)
-        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=lr_decay_steps, gamma=lr_decay)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=iterations, eta_min=lr_min
+        )
         
         # 恢复优化器和调度器状态
         if optimizer_state is not None:
