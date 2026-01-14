@@ -167,7 +167,8 @@ python -m ai.train --iterations 200 --episodes 200 --simulations 1600
 | `--small-network` | - | 使用小型网络(5层) |
 | `--device` | auto | 计算设备(auto/cpu/cuda/hybrid) |
 | `--workers` | 1 | 并行进程数（多核加速） |
-| `--resume` | - | 从检查点恢复训练 |
+| `--resume` | - | 从指定检查点恢复训练 |
+| `--auto-resume` | - | 自动从最新检查点恢复 |
 | `--eval-interval` | 5 | 评估间隔(每N轮评估一次) |
 
 ### 🚀 多核并行训练（推荐）
@@ -230,10 +231,90 @@ pip install torch --index-url https://download.pytorch.org/whl/cu121
 
 ### 训练输出
 
-训练过程会在 `backend/models/` 目录生成：
-- `checkpoint_{iter}.pth` - 每隔几轮保存的检查点
+训练过程会生成以下文件：
+
+**`backend/models/` 目录**：
+- `checkpoint_{iter}.pth` - 每隔几轮保存的检查点（包含完整训练状态）
 - `best_model.pth` - 当前最佳模型（AlphaZero风格选择）
 - `training_stats.json` - 训练统计信息
+
+**`backend/data/` 目录**：
+- `replay_buffer.pkl` - 经验回放池（用于断点续训）
+
+### 🔄 断点续训
+
+支持从检查点恢复训练，保留完整的训练状态（网络权重、优化器状态、学习率调度器、经验回放池）。
+
+#### 续训命令
+
+```bash
+cd backend
+conda activate gomoku
+
+# 方式1：手动指定检查点
+python -m ai.train --resume models/checkpoint_10.pth --iterations 50
+
+# 方式2：自动从最新检查点恢复（推荐）
+python -m ai.train --auto-resume --iterations 50
+
+# 结合多核加速
+python -m ai.train --auto-resume --workers 6 --iterations 100 --episodes 20
+```
+
+#### 检查点保存内容
+
+| 内容 | 说明 |
+|------|------|
+| 网络权重 | 神经网络参数 |
+| 优化器状态 | Adam 动量等 |
+| 学习率调度器 | 当前学习率位置 |
+| 迭代次数 | 从第N轮继续 |
+| 训练统计 | 历史损失、胜率等 |
+| 经验回放池 | data/replay_buffer.pkl（自动加载） |
+
+#### 参数兼容性
+
+**✅ 续训时可以修改的参数**：
+
+| 参数 | 说明 |
+|------|------|
+| `--iterations` | 可以设置新的目标迭代次数 |
+| `--episodes` | 可以调整每轮对弈局数 |
+| `--simulations` | 可以调整MCTS模拟次数 |
+| `--batch-size` | 可以调整训练批次大小 |
+| `--epochs` | 可以调整每轮训练epoch数 |
+| `--workers` | 可以调整并行进程数 |
+| `--device` | 可以切换设备（cpu/cuda/hybrid） |
+| `--eval-interval` | 可以调整评估间隔 |
+
+**❌ 续训时不能修改的参数**：
+
+| 参数 | 原因 |
+|------|------|
+| `--small-network` | 网络结构必须与检查点一致 |
+| `--lr` | 会被调度器状态覆盖（但可以手动重置调度器） |
+| `--model-dir` | 建议保持一致，避免混乱 |
+
+**⚠️ 注意事项**：
+- 使用 `--auto-resume` 时，会自动检测网络类型是否匹配
+- 如果检查点与当前 `--small-network` 参数不匹配，会报错并提示
+- 经验回放池从 `data/replay_buffer.pkl` 自动加载，无需手动指定
+
+#### 续训示例场景
+
+```bash
+# 场景1：之前用小网络训练了10轮，继续训练到50轮
+python -m ai.train --small-network --auto-resume --iterations 50
+
+# 场景2：增加每轮对弈局数，加速数据收集
+python -m ai.train --auto-resume --episodes 30 --iterations 100
+
+# 场景3：切换到GPU训练（如果之前用CPU）
+python -m ai.train --auto-resume --device cuda --iterations 100
+
+# 场景4：增加MCTS模拟次数提高数据质量
+python -m ai.train --auto-resume --simulations 800 --iterations 100
+```
 
 ### 最佳模型选择策略
 
@@ -258,8 +339,8 @@ Gomoku-AI/
 │   │   ├── mcts.py             # MCTS实现：UCB选择、回溯更新
 │   │   ├── train.py            # 训练循环：自我对弈→训练→评估
 │   │   └── self_play.py        # 自我对弈：数据生成、数据增强
-│   ├── models/                 # 模型保存目录
-│   ├── data/                   # 训练数据目录
+│   ├── models/                 # 模型保存目录（检查点、最佳模型）
+│   ├── data/                   # 训练数据目录（经验回放池）
 │   └── requirements.txt        # Python依赖
 │
 ├── frontend/

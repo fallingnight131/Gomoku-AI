@@ -33,18 +33,22 @@ class Trainer:
     def __init__(
         self,
         model_dir: str = 'models',
+        data_dir: str = 'data',
         use_small_network: bool = False,
         device: str = 'auto'
     ):
         """
         Args:
             model_dir: 模型保存目录
+            data_dir: 数据保存目录（经验池等）
             use_small_network: 是否使用小型网络
             device: 计算设备 ('auto', 'cpu', 'cuda', 'hybrid')
                    'hybrid' = GPU训练 + CPU自我对弈/评估（推荐有GPU时使用）
         """
         self.model_dir = model_dir
+        self.data_dir = data_dir
         os.makedirs(model_dir, exist_ok=True)
+        os.makedirs(data_dir, exist_ok=True)
         self.use_small_network = use_small_network
         
         # 设置设备
@@ -180,7 +184,10 @@ class Trainer:
         eval_games: int = 20,
         save_interval: int = 5,
         num_workers: int = 1,
-        verbose: bool = True
+        verbose: bool = True,
+        start_iteration: int = 0,
+        optimizer_state: dict = None,
+        scheduler_state: dict = None
     ):
         """
         主训练循环
@@ -198,13 +205,31 @@ class Trainer:
             save_interval: 保存间隔
             num_workers: 并行自我对弈的进程数 (1=不并行)
             verbose: 是否打印详细信息
+            start_iteration: 起始迭代数（用于断点续训）
+            optimizer_state: 优化器状态（用于断点续训）
+            scheduler_state: 调度器状态（用于断点续训）
         """
         # 优化器
         optimizer = optim.Adam(self.network.parameters(), lr=lr, weight_decay=1e-4)
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=lr_decay_steps, gamma=lr_decay)
         
+        # 恢复优化器和调度器状态
+        if optimizer_state is not None:
+            optimizer.load_state_dict(optimizer_state)
+            print(f"✓ 恢复优化器状态")
+        if scheduler_state is not None:
+            scheduler.load_state_dict(scheduler_state)
+            print(f"✓ 恢复学习率调度器状态")
+        
+        # 计算实际迭代范围
+        actual_start = start_iteration + 1
+        actual_end = start_iteration + iterations + 1
+        
+        if start_iteration > 0:
+            print(f"📌 从迭代 {actual_start} 继续训练，目标迭代 {actual_end - 1}")
+        
         # 总体进度条
-        pbar = tqdm(range(1, iterations + 1), desc="🎮 训练进度", unit="轮")
+        pbar = tqdm(range(actual_start, actual_end), desc="🎮 训练进度", unit="轮")
         
         for iteration in pbar:
             self.stats['iteration'] = iteration
@@ -274,8 +299,8 @@ class Trainer:
                 win_rate_random = self._evaluate_vs_random(num_games=10, num_workers=eval_workers)
                 self.stats['win_rate_vs_random'] = win_rate_random
                 
-                # 保存检查点
-                self._save_checkpoint(iteration)
+                # 保存检查点（包含优化器和调度器状态）
+                self._save_checkpoint(iteration, optimizer, scheduler)
                 
                 # 与当前最佳模型对弈决定是否更新
                 if self.best_network is None:
@@ -588,11 +613,46 @@ class Trainer:
         
         return wins, losses, draws
     
-    def _save_checkpoint(self, iteration: int) -> None:
-        """保存检查点"""
+    def _save_checkpoint(self, iteration: int, optimizer: optim.Optimizer = None, scheduler = None) -> None:
+        """
+        保存检查点（包含完整训练状态）
+        
+        Args:
+            iteration: 当前迭代数
+            optimizer: 优化器（可选）
+            scheduler: 学习率调度器（可选）
+        """
+        # 保存网络参数
         path = os.path.join(self.model_dir, f'checkpoint_{iteration}.pth')
-        self.network.save(path)
+        
+        checkpoint = {
+            'iteration': iteration,
+            'model_state_dict': self.network.state_dict(),
+            'network_class': type(self.network).__name__,
+            'num_res_blocks': len(self.network.res_blocks),
+            'num_channels': self.network.res_blocks[0].conv1.out_channels if hasattr(self.network, 'res_blocks') and len(self.network.res_blocks) > 0 else 64,
+            'stats': {
+                'iteration': self.stats['iteration'],
+                'total_games': self.stats['total_games'],
+                'win_rate_vs_random': self.stats['win_rate_vs_random'],
+                'best_model_iteration': self.stats['best_model_iteration'],
+            }
+        }
+        
+        # 保存优化器状态
+        if optimizer is not None:
+            checkpoint['optimizer_state_dict'] = optimizer.state_dict()
+        
+        # 保存调度器状态
+        if scheduler is not None:
+            checkpoint['scheduler_state_dict'] = scheduler.state_dict()
+        
+        torch.save(checkpoint, path)
         print(f"保存检查点: {path}")
+        
+        # 保存经验池到data目录
+        buffer_path = os.path.join(self.data_dir, 'replay_buffer.pkl')
+        self.replay_buffer.save(buffer_path)
     
     def _update_best_model(self, iteration: int) -> None:
         """更新最佳模型"""
@@ -631,10 +691,43 @@ class Trainer:
         with open(path, 'w') as f:
             json.dump(stats_to_save, f, indent=2)
     
-    def load_checkpoint(self, path: str) -> None:
-        """加载检查点"""
-        self.network = PolicyValueNetwork.load(path, device=self.device)
-        print(f"加载检查点: {path}")
+    def load_checkpoint(self, path: str) -> Tuple[int, Optional[dict], Optional[dict]]:
+        """
+        加载检查点（包含完整训练状态）
+        
+        Args:
+            path: 检查点路径
+        
+        Returns:
+            (起始迭代数, 优化器状态, 调度器状态)
+        """
+        checkpoint = torch.load(path, map_location=self.device)
+        
+        # 加载网络参数
+        self.network.load_state_dict(checkpoint['model_state_dict'])
+        self.network.to(self.device)
+        print(f"✓ 加载检查点: {path}")
+        
+        # 恢复训练统计
+        if 'stats' in checkpoint:
+            saved_stats = checkpoint['stats']
+            self.stats['iteration'] = saved_stats.get('iteration', 0)
+            self.stats['total_games'] = saved_stats.get('total_games', 0)
+            self.stats['win_rate_vs_random'] = saved_stats.get('win_rate_vs_random', 0.0)
+            self.stats['best_model_iteration'] = saved_stats.get('best_model_iteration', 0)
+            print(f"  恢复训练状态: 迭代 {self.stats['iteration']}, 总对局 {self.stats['total_games']}")
+        
+        # 加载经验池
+        buffer_path = os.path.join(self.data_dir, 'replay_buffer.pkl')
+        if self.replay_buffer.load(buffer_path):
+            print(f"  经验池: {len(self.replay_buffer)} 条数据")
+        
+        # 返回用于恢复优化器的状态
+        start_iteration = checkpoint.get('iteration', 0)
+        optimizer_state = checkpoint.get('optimizer_state_dict', None)
+        scheduler_state = checkpoint.get('scheduler_state_dict', None)
+        
+        return start_iteration, optimizer_state, scheduler_state
 
 
 def main():
@@ -647,24 +740,39 @@ def main():
     parser.add_argument('--epochs', type=int, default=5, help='每轮训练epoch数')
     parser.add_argument('--lr', type=float, default=0.001, help='学习率')
     parser.add_argument('--model-dir', type=str, default='models', help='模型保存目录')
+    parser.add_argument('--data-dir', type=str, default='data', help='数据保存目录')
     parser.add_argument('--small-network', action='store_true', help='使用小型网络')
     parser.add_argument('--device', type=str, default='auto', help='计算设备')
-    parser.add_argument('--resume', type=str, default=None, help='从检查点恢复')
+    parser.add_argument('--resume', type=str, default=None, help='从指定检查点恢复')
+    parser.add_argument('--auto-resume', action='store_true', help='自动从最新检查点恢复')
     parser.add_argument('--eval-interval', type=int, default=5, help='评估间隔(每N轮评估一次)')
     parser.add_argument('--workers', type=int, default=1, help='并行自我对弈进程数 (1=不并行)')
     
     args = parser.parse_args()
     
+    # 自动查找最新检查点
+    resume_path = args.resume
+    if args.auto_resume and resume_path is None:
+        resume_path = find_latest_checkpoint(args.model_dir)
+        if resume_path:
+            print(f"🔍 自动发现最新检查点: {resume_path}")
+    
     # 创建训练器
     trainer = Trainer(
         model_dir=args.model_dir,
+        data_dir=args.data_dir,
         use_small_network=args.small_network,
         device=args.device
     )
     
+    # 断点续训参数
+    start_iteration = 0
+    optimizer_state = None
+    scheduler_state = None
+    
     # 恢复训练
-    if args.resume:
-        trainer.load_checkpoint(args.resume)
+    if resume_path:
+        start_iteration, optimizer_state, scheduler_state = trainer.load_checkpoint(resume_path)
     
     # 开始训练
     trainer.train(
@@ -676,8 +784,74 @@ def main():
         lr=args.lr,
         save_interval=args.eval_interval,
         num_workers=args.workers,
-        verbose=True
+        verbose=True,
+        start_iteration=start_iteration,
+        optimizer_state=optimizer_state,
+        scheduler_state=scheduler_state
     )
+
+
+def find_latest_checkpoint(model_dir: str) -> Optional[str]:
+    """
+    查找最新的检查点文件
+    
+    Args:
+        model_dir: 模型目录
+    
+    Returns:
+        最新检查点的路径，如果没有则返回None
+    """
+    import glob
+    import re
+    
+    if not os.path.exists(model_dir):
+        return None
+    
+    # 查找所有检查点文件
+    pattern = os.path.join(model_dir, 'checkpoint_*.pth')
+    checkpoints = glob.glob(pattern)
+    
+    if not checkpoints:
+        return None
+    
+    # 提取迭代数并排序
+    def get_iteration(path):
+        match = re.search(r'checkpoint_(\d+)\.pth', path)
+        return int(match.group(1)) if match else 0
+    
+    checkpoints.sort(key=get_iteration, reverse=True)
+    return checkpoints[0]
+
+
+def check_resume_compatibility(checkpoint_path: str, use_small_network: bool) -> Tuple[bool, str]:
+    """
+    检查检查点与当前配置的兼容性
+    
+    Args:
+        checkpoint_path: 检查点路径
+        use_small_network: 是否使用小型网络
+    
+    Returns:
+        (是否兼容, 原因说明)
+    """
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        
+        # 检查网络类型
+        saved_class = checkpoint.get('network_class', 'PolicyValueNetwork')
+        saved_blocks = checkpoint.get('num_res_blocks', 10)
+        
+        is_saved_small = saved_class == 'PolicyValueNetworkSmall' or saved_blocks <= 5
+        
+        if is_saved_small != use_small_network:
+            if is_saved_small:
+                return False, "检查点是小型网络，但当前未指定 --small-network"
+            else:
+                return False, "检查点是标准网络，但当前指定了 --small-network"
+        
+        return True, "兼容"
+    except Exception as e:
+        return False, f"无法读取检查点: {e}"
 
 
 if __name__ == '__main__':

@@ -467,6 +467,55 @@ class ReplayBuffer:
     def clear(self) -> None:
         """清空缓冲区"""
         self.buffer.clear()
+    
+    def save(self, path: str) -> None:
+        """
+        保存经验池到文件
+        
+        Args:
+            path: 保存路径
+        """
+        import pickle
+        
+        # 将数据转换为更紧凑的格式
+        data = {
+            'max_size': self.max_size,
+            'buffer': self.buffer
+        }
+        
+        with open(path, 'wb') as f:
+            pickle.dump(data, f)
+        
+        print(f"✓ 经验池已保存: {path} ({len(self.buffer)} 条数据)")
+    
+    def load(self, path: str) -> bool:
+        """
+        从文件加载经验池
+        
+        Args:
+            path: 加载路径
+        
+        Returns:
+            是否加载成功
+        """
+        import pickle
+        import os
+        
+        if not os.path.exists(path):
+            return False
+        
+        try:
+            with open(path, 'rb') as f:
+                data = pickle.load(f)
+            
+            self.max_size = data.get('max_size', self.max_size)
+            self.buffer = data.get('buffer', [])
+            
+            print(f"✓ 经验池已加载: {path} ({len(self.buffer)} 条数据)")
+            return True
+        except Exception as e:
+            print(f"⚠ 加载经验池失败: {e}")
+            return False
 
 
 if __name__ == '__main__':
