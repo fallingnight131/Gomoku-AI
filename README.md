@@ -167,6 +167,7 @@ python -m ai.train --iterations 200 --episodes 200 --simulations 1600
 | `--small-network` | - | 使用小型网络(5层) |
 | `--device` | auto | 计算设备(auto/cpu/cuda/hybrid) |
 | `--workers` | 1 | 并行进程数（多核加速） |
+| `--buffer-size` | 50000 | 经验池最大容量 |
 | `--resume` | - | 从指定检查点恢复训练 |
 | `--auto-resume` | - | 自动从最新检查点恢复 |
 | `--eval-interval` | 5 | 评估间隔(每N轮评估一次) |

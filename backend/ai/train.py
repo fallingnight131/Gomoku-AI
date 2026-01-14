@@ -35,7 +35,8 @@ class Trainer:
         model_dir: str = 'models',
         data_dir: str = 'data',
         use_small_network: bool = False,
-        device: str = 'auto'
+        device: str = 'auto',
+        buffer_size: int = 50000
     ):
         """
         Args:
@@ -101,7 +102,7 @@ class Trainer:
         self._load_best_model_if_exists(use_small_network)
         
         # 经验回放缓冲区
-        self.replay_buffer = ReplayBuffer(max_size=50000)
+        self.replay_buffer = ReplayBuffer(max_size=buffer_size)
         
         # 训练统计
         self.stats = {
@@ -285,7 +286,7 @@ class Trainer:
                 # 单进程模式也需要更新进度
                 new_data = []
                 for game_idx in range(episodes_per_iteration):
-                    game_data = self_play_worker.self_play_games(num_games=1, augment=True, verbose=False)
+                    game_data = self_play_worker.self_play_games(num_games=1, augment=True, verbose=False, show_progress=False)
                     new_data.extend(game_data)
                     pbar.update(1)
                     pbar.set_postfix_str(f"自我对弈 {game_idx+1}/{episodes_per_iteration}局")
@@ -470,54 +471,47 @@ class Trainer:
             )
             return wins / num_games
         
-        # 单进程模式（原有逻辑）
-        # 混合模式使用CPU网络评估
+        # 单进程模式（无嵌套进度条，直接用 progress_callback）
         if self.hybrid_mode:
             eval_network = self._get_cpu_network()
         else:
             self.network.eval()
             eval_network = self.network
-        
+
         wins = 0
         draws = 0
-        
-        # 评估时使用较少的模拟次数（100次 vs 训练时的更多次数）
-        # 因为随机玩家很弱，不需要太强的搜索
+
         mcts_player = MCTSPlayer(eval_network, simulations=100, temperature=0)
         random_player = RandomPlayer()
-        
-        pbar = tqdm(range(num_games), desc="  vs随机", leave=False, unit="局")
-        for game_idx in pbar:
+
+        for game_idx in range(num_games):
             board = Board()
-            
-            # 交替先后手
             if game_idx % 2 == 0:
-                players = [mcts_player, random_player]  # AI先手
+                players = [mcts_player, random_player]
                 ai_color = 1
             else:
-                players = [random_player, mcts_player]  # AI后手
+                players = [random_player, mcts_player]
                 ai_color = 2
-            
+
             current = 0
             while not board.is_game_over():
                 if isinstance(players[current], MCTSPlayer):
                     action = players[current].get_action(board)
                 else:
                     action = players[current].get_action(board)
-                
                 x, y = action // 15, action % 15
                 board.move(x, y)
                 current = 1 - current
-            
+
             winner = board.get_winner()
             if winner == ai_color:
                 wins += 1
             elif winner == 0:
                 draws += 1
-            
-            pbar.set_postfix_str(f"胜{wins}")
-        pbar.close()
-        
+
+            if progress_callback:
+                progress_callback(game_idx + 1, num_games, wins, num_games - wins - draws, draws)
+
         return wins / num_games
     
     def _evaluate_vs_best(self, num_games: int = 20, num_workers: int = 1, pbar = None, progress_callback = None) -> float:
@@ -566,8 +560,7 @@ class Trainer:
             
             return (wins + 0.5 * draws) / num_games
         
-        # 单进程模式（原有逻辑）
-        # 混合模式使用CPU网络评估
+        # 单进程模式（无嵌套进度条，直接用 progress_callback）
         if self.hybrid_mode:
             eval_network = self._get_cpu_network()
             best_eval_network = self._get_cpu_best_network()
@@ -576,16 +569,40 @@ class Trainer:
             self.best_network.eval()
             eval_network = self.network
             best_eval_network = self.best_network
-        
-        # 新模型 vs 最佳模型
-        # 评估时使用100次模拟（比训练时少，但足够判断强弱）
+
         new_player = MCTSPlayer(eval_network, simulations=100, temperature=0)
         best_player = MCTSPlayer(best_eval_network, simulations=100, temperature=0)
-        
-        wins, losses, draws = self._play_evaluation_games(
-            new_player, best_player, num_games, "  vs最佳"
-        )
-        
+
+        wins = 0
+        losses = 0
+        draws = 0
+        for game_idx in range(num_games):
+            board = Board()
+            if game_idx % 2 == 0:
+                players = [new_player, best_player]
+                p1_color = 1
+            else:
+                players = [best_player, new_player]
+                p1_color = 2
+
+            current = 0
+            while not board.is_game_over():
+                action = players[current].get_action(board)
+                x, y = action // 15, action % 15
+                board.move(x, y)
+                current = 1 - current
+
+            winner = board.get_winner()
+            if winner == p1_color:
+                wins += 1
+            elif winner == 0:
+                draws += 1
+            else:
+                losses += 1
+
+            if progress_callback:
+                progress_callback(game_idx + 1, num_games, wins, losses, draws)
+
         win_rate = (wins + 0.5 * draws) / num_games
         return win_rate
     
@@ -772,6 +789,7 @@ def main():
     parser.add_argument('--auto-resume', action='store_true', help='自动从最新检查点恢复')
     parser.add_argument('--eval-interval', type=int, default=5, help='评估间隔(每N轮评估一次)')
     parser.add_argument('--workers', type=int, default=1, help='并行自我对弈进程数 (1=不并行)')
+    parser.add_argument('--buffer-size', type=int, default=50000, help='经验池最大容量')
     
     args = parser.parse_args()
     
@@ -787,7 +805,8 @@ def main():
         model_dir=args.model_dir,
         data_dir=args.data_dir,
         use_small_network=args.small_network,
-        device=args.device
+        device=args.device,
+        buffer_size=args.buffer_size
     )
     
     # 断点续训参数

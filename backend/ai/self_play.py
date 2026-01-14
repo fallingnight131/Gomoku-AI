@@ -176,7 +176,8 @@ class SelfPlayWorker:
         self,
         num_games: int,
         augment: bool = True,
-        verbose: bool = False
+        verbose: bool = False,
+        show_progress: bool = True
     ) -> List[Tuple[np.ndarray, np.ndarray, float]]:
         """
         进行多局自我对弈
@@ -185,22 +186,26 @@ class SelfPlayWorker:
             num_games: 游戏局数
             augment: 是否数据增强
             verbose: 是否打印详细信息
+            show_progress: 是否显示进度条
         
         Returns:
             所有游戏的训练数据
         """
         all_data = []
-        
-        pbar = tqdm(range(num_games), desc="  自我对弈", leave=False, unit="局")
-        for i in pbar:
-            record = self.self_play_one_game(verbose=False, pbar=pbar)
-            game_data = record.to_training_data(augment=augment)
-            all_data.extend(game_data)
-            
-            winner_str = '黑胜' if record.winner == 1 else '白胜' if record.winner == 2 else '平'
-            pbar.set_postfix_str(f"{winner_str} {len(record.states)}步")
-        
-        pbar.close()
+        if show_progress:
+            pbar = tqdm(range(num_games), desc="  自我对弈", leave=False, unit="局")
+            for i in pbar:
+                record = self.self_play_one_game(verbose=False, pbar=pbar)
+                game_data = record.to_training_data(augment=augment)
+                all_data.extend(game_data)
+                winner_str = '黑胜' if record.winner == 1 else '白胜' if record.winner == 2 else '平'
+                pbar.set_postfix_str(f"{winner_str} {len(record.states)}步")
+            pbar.close()
+        else:
+            for i in range(num_games):
+                record = self.self_play_one_game(verbose=False, pbar=None)
+                game_data = record.to_training_data(augment=augment)
+                all_data.extend(game_data)
         return all_data
     
     def self_play_games_parallel(
