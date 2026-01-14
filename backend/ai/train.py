@@ -294,8 +294,6 @@ class Trainer:
             self.stats['total_games'] += episodes_per_iteration
             
             elapsed = time.time() - start_time
-            if verbose:
-                tqdm.write(f"[迭代 {iteration}] 自我对弈: {len(new_data)} 样本, {elapsed:.1f}s")
             
             # Phase 2: 网络训练
             pbar.set_postfix_str("训练网络中...")
@@ -312,6 +310,9 @@ class Trainer:
             
             elapsed = time.time() - start_time
             avg_loss = np.mean(losses)
+            
+            if verbose:
+                tqdm.write(f"[迭代 {iteration}] 自我对弈: {len(new_data)} 样本, {elapsed:.1f}s, loss={avg_loss:.4f}")
             
             # Phase 3: 模型评估（只在特定轮次执行）
             is_eval_iteration = (iteration % save_interval == 0 or iteration == 1)
