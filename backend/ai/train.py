@@ -398,7 +398,7 @@ class Trainer:
             wins, losses, draws = evaluate_games_parallel(
                 network1_state_dict=network_state,
                 network2_state_dict=None,  # None表示随机玩家
-                network_class=network_class,
+                network1_class=network_class,
                 num_games=num_games,
                 num_workers=num_workers,
                 simulations=100,
@@ -481,14 +481,16 @@ class Trainer:
             best_network_state = self.best_network.cpu().state_dict()
             self.network.to(self.device)  # 恢复到原设备
             self.best_network.to(self.device)
-            network_class = type(self.network).__name__
+            network1_class = type(self.network).__name__
+            network2_class = type(self.best_network).__name__
             
             # 先20局快速评估
             quick_games = 20
             wins, losses, draws = evaluate_games_parallel(
                 network1_state_dict=network_state,
                 network2_state_dict=best_network_state,
-                network_class=network_class,
+                network1_class=network1_class,
+                network2_class=network2_class,
                 num_games=quick_games,
                 num_workers=num_workers,
                 simulations=100,
@@ -507,7 +509,8 @@ class Trainer:
                 more_wins, more_losses, more_draws = evaluate_games_parallel(
                     network1_state_dict=network_state,
                     network2_state_dict=best_network_state,
-                    network_class=network_class,
+                    network1_class=network1_class,
+                    network2_class=network2_class,
                     num_games=remaining,
                     num_workers=num_workers,
                     simulations=100,

@@ -297,7 +297,7 @@ def _evaluate_game_worker(args) -> Tuple[int, int]:
     评估对局的worker函数（用于多进程）
     
     Args:
-        args: (network1_state_dict, network2_state_dict, network_class, 
+        args: (network1_state_dict, network2_state_dict, network1_class, network2_class,
                simulations, game_idx, is_vs_random)
         network2_state_dict: None表示对手是随机玩家
     
@@ -305,7 +305,7 @@ def _evaluate_game_worker(args) -> Tuple[int, int]:
         (player1结果, game_idx)
         结果: 1=胜, 0=平, -1=负
     """
-    (network1_state, network2_state, network_class, 
+    (network1_state, network2_state, network1_class, network2_class,
      simulations, game_idx, is_vs_random) = args
     
     from ai.network import PolicyValueNetwork, PolicyValueNetworkSmall
@@ -313,7 +313,7 @@ def _evaluate_game_worker(args) -> Tuple[int, int]:
     from game.board import Board
     
     # 创建网络1
-    if network_class == 'PolicyValueNetworkSmall':
+    if network1_class == 'PolicyValueNetworkSmall':
         network1 = PolicyValueNetworkSmall()
     else:
         network1 = PolicyValueNetwork()
@@ -326,7 +326,7 @@ def _evaluate_game_worker(args) -> Tuple[int, int]:
     if is_vs_random:
         player2 = RandomPlayer()
     else:
-        if network_class == 'PolicyValueNetworkSmall':
+        if network2_class == 'PolicyValueNetworkSmall':
             network2 = PolicyValueNetworkSmall()
         else:
             network2 = PolicyValueNetwork()
@@ -366,9 +366,10 @@ def _evaluate_game_worker(args) -> Tuple[int, int]:
 def evaluate_games_parallel(
     network1_state_dict: dict,
     network2_state_dict: Optional[dict],
-    network_class: str,
-    num_games: int,
-    num_workers: int,
+    network1_class: str,
+    network2_class: str = None,
+    num_games: int = 10,
+    num_workers: int = 1,
     simulations: int = 100,
     desc: str = "评估"
 ) -> Tuple[int, int, int]:
@@ -378,7 +379,8 @@ def evaluate_games_parallel(
     Args:
         network1_state_dict: 网络1参数
         network2_state_dict: 网络2参数，None表示对手是随机玩家
-        network_class: 网络类名
+        network1_class: 网络1类名
+        network2_class: 网络2类名（如果不同于网络1）
         num_games: 对局数
         num_workers: 进程数
         simulations: MCTS模拟次数
@@ -389,13 +391,18 @@ def evaluate_games_parallel(
     """
     is_vs_random = network2_state_dict is None
     
+    # 如果没指定 network2_class，默认与 network1_class 相同
+    if network2_class is None:
+        network2_class = network1_class
+    
     # 准备参数
     args = []
     for i in range(num_games):
         args.append((
             network1_state_dict,
             network2_state_dict,
-            network_class,
+            network1_class,
+            network2_class,
             simulations,
             i,
             is_vs_random
