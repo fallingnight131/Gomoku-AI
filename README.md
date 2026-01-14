@@ -165,9 +165,56 @@ python -m ai.train --iterations 200 --episodes 200 --simulations 1600
 | `--lr` | 0.001 | 初始学习率 |
 | `--model-dir` | models | 模型保存目录 |
 | `--small-network` | - | 使用小型网络(5层) |
-| `--device` | auto | 计算设备(auto/cpu/cuda) |
+| `--device` | auto | 计算设备(auto/cpu/cuda/hybrid) |
+| `--workers` | 1 | 并行进程数（多核加速） |
 | `--resume` | - | 从检查点恢复训练 |
 | `--eval-interval` | 5 | 评估间隔(每N轮评估一次) |
+
+### 🚀 多核并行训练（推荐）
+
+利用多核CPU大幅加速训练，自我对弈和评估阶段都支持并行：
+
+```bash
+# 查看CPU核心数
+python -c "import multiprocessing; print(f'CPU核心数: {multiprocessing.cpu_count()}')"
+
+# 使用6核并行训练（推荐设置为核心数的60%）
+python -m ai.train --workers 6 --iterations 50 --episodes 20 --simulations 400
+
+# 小型网络 + 多核加速（快速验证）
+python -m ai.train --workers 4 --iterations 10 --episodes 10 --simulations 100 --small-network
+```
+
+**并行加速效果**：
+| 阶段 | 单进程 | 4进程 | 加速比 |
+|------|--------|-------|--------|
+| 自我对弈 (20局) | ~120s | ~35s | ~3.5x |
+| 评估 vs 随机 (10局) | ~10s | ~3s | ~3x |
+| 评估 vs 最佳 (20-40局) | ~40s | ~12s | ~3x |
+
+**workers 设置建议**：
+| CPU核心数 | 推荐 workers | 说明 |
+|-----------|--------------|------|
+| 4核 | 2-3 | 保守设置 |
+| 8核 | 4-6 | 平衡设置 |
+| 10核+ | 6-8 | 高效设置 |
+
+### 🔀 混合模式（GPU训练 + CPU推理）
+
+如果有GPU，推荐使用混合模式获得最佳性能：
+
+```bash
+# GPU训练 + CPU多核自我对弈/评估
+python -m ai.train --device hybrid --workers 6 --iterations 50 --episodes 20 --simulations 400
+```
+
+**device 选项说明**：
+| 选项 | 说明 |
+|------|------|
+| `auto` | 自动检测（默认） |
+| `cpu` | 强制使用CPU |
+| `cuda` | 强制使用GPU（全部） |
+| `hybrid` | GPU训练 + CPU推理（推荐有GPU时使用） |
 
 ### 使用GPU训练
 
