@@ -208,10 +208,14 @@ class Trainer:
             optimizer_state: 优化器状态（用于断点续训）
             scheduler_state: 调度器状态（用于断点续训）
         """
-        # 优化器（余弦退火调度器，学习率从 lr 平滑衰减到 lr_min）
+        # 优化器 + ReduceLROnPlateau 调度器
         optimizer = optim.Adam(self.network.parameters(), lr=lr, weight_decay=1e-4)
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=iterations, eta_min=lr_min
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=0.5,          # 每次减半
+            patience=5,          # 5轮不降再降lr
+            verbose=True
         )
         
         # 恢复优化器和调度器状态
@@ -307,10 +311,9 @@ class Trainer:
             )
             
             self.stats['losses'].extend(losses)
-            scheduler.step()
-            
             elapsed = time.time() - start_time
             avg_loss = np.mean(losses)
+            scheduler.step(avg_loss)
             
             if verbose:
                 tqdm.write(f"[迭代 {iteration}] 自我对弈: {len(new_data)} 样本, {elapsed:.1f}s, loss={avg_loss:.4f}")
@@ -412,26 +415,33 @@ class Trainer:
             values_tensor = torch.FloatTensor(values).unsqueeze(1).to(self.device)
             
             # 前向传播
-            log_probs, pred_values = self.network(states_tensor)
+            pred_logits, pred_values = self.network(states_tensor)
             
             # 计算损失
             # 策略损失: 交叉熵
-            policy_loss = -torch.mean(torch.sum(probs_tensor * log_probs, dim=1))
+            # policy_loss = -torch.mean(torch.sum(probs_tensor * log_probs, dim=1))
+            policy_loss = torch.nn.functional.kl_div(
+                torch.nn.functional.log_softmax(pred_logits, dim=1),
+                probs_tensor,
+                reduction='batchmean'
+            )
             
             # 价值损失: MSE
             value_loss = nn.functional.mse_loss(pred_values, values_tensor)
             
             # 总损失
-            total_loss = policy_loss + value_loss
+            total_loss = 3.0 * value_loss + policy_loss  # 3:1权重
             
             # 反向传播
             optimizer.zero_grad()
             total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=1.0)
             optimizer.step()
             
             losses.append(total_loss.item())
         
         return losses
+
     
     def _evaluate_vs_random(self, num_games: int = 20, num_workers: int = 1, pbar = None, progress_callback = None) -> float:
         """

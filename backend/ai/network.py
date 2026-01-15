@@ -81,9 +81,12 @@ class PolicyValueNetwork(nn.Module):
         ])
         
         # 策略头
-        self.policy_conv = nn.Conv2d(num_channels, 2, kernel_size=1, bias=False)
-        self.policy_bn = nn.BatchNorm2d(2)
-        self.policy_fc = nn.Linear(2 * board_size * board_size, self.action_size)
+        # self.policy_conv = nn.Conv2d(num_channels, 2, kernel_size=1, bias=False)
+        # self.policy_bn = nn.BatchNorm2d(2)
+        # self.policy_fc = nn.Linear(2 * board_size * board_size, self.action_size)
+        self.policy_conv1 = nn.Conv2d(num_channels, num_channels // 4, kernel_size=3, padding=1)
+        self.policy_bn1 = nn.BatchNorm2d(num_channels // 4)
+        self.policy_conv2 = nn.Conv2d(num_channels // 4, 1, kernel_size=3, padding=1)
         
         # 价值头
         self.value_conv = nn.Conv2d(num_channels, 1, kernel_size=1, bias=False)
@@ -107,6 +110,20 @@ class PolicyValueNetwork(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
     
+        # 特殊处理：价值头最后一层用小初始化
+        # 避免tanh饱和
+        if hasattr(self, 'value_fc2'):
+            nn.init.normal_(self.value_fc2.weight, mean=0.0, std=0.01)
+            if self.value_fc2.bias is not None:
+                nn.init.constant_(self.value_fc2.bias, 0.0)
+        
+        # 策略头最后一层也用小初始化
+        # 避免输出过于极端
+        if hasattr(self, 'policy_fc'):
+            nn.init.normal_(self.policy_fc.weight, mean=0.0, std=0.01)
+            if self.policy_fc.bias is not None:
+                nn.init.constant_(self.policy_fc.bias, 0.0)
+    
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         前向传播
@@ -128,12 +145,18 @@ class PolicyValueNetwork(nn.Module):
             out = res_block(out)
         
         # 策略头
-        policy = self.policy_conv(out)
-        policy = self.policy_bn(policy)
+        # policy = self.policy_conv(out)
+        # policy = self.policy_bn(policy)
+        # policy = F.relu(policy)
+        # policy = policy.view(policy.size(0), -1)
+        # policy = self.policy_fc(policy)
+        # policy = F.log_softmax(policy, dim=1)  # 输出log概率
+        policy = self.policy_conv1(out)     # (batch, 16, 15, 15)
+        policy = self.policy_bn1(policy)
         policy = F.relu(policy)
-        policy = policy.view(policy.size(0), -1)
-        policy = self.policy_fc(policy)
-        policy = F.log_softmax(policy, dim=1)  # 输出log概率
+        policy = self.policy_conv2(policy)  # (batch, 1, 15, 15)
+        policy = policy.squeeze(1)          # (batch, 15, 15)
+        policy = policy.view(policy.size(0), -1)  # (batch, 225)
         
         # 价值头
         value = self.value_conv(out)
@@ -165,8 +188,8 @@ class PolicyValueNetwork(nn.Module):
             device = next(self.parameters()).device
             x = x.to(device)
             
-            log_probs, value = self.forward(x)
-            probs = torch.exp(log_probs).squeeze(0).cpu().numpy()
+            logits, value = self.forward(x)
+            probs = F.softmax(logits, dim=1).squeeze(0).cpu().numpy()
             value = value.squeeze().cpu().numpy().item()
         
         return probs, value

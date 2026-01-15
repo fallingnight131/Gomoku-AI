@@ -127,7 +127,7 @@ class MCTS:
         self,
         network: 'PolicyValueNetwork',
         simulations: int = 800,
-        c_puct: float = 2.0,
+        c_puct: float = 1.0,
         dirichlet_alpha: float = 0.3,
         dirichlet_epsilon: float = 0.25
     ):
