@@ -214,8 +214,7 @@ class Trainer:
             optimizer,
             mode='min',
             factor=0.5,          # 每次减半
-            patience=5,          # 5轮不降再降lr
-            verbose=True
+            patience=5           # 5轮不降再降lr
         )
         
         # 恢复优化器和调度器状态
