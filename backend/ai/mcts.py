@@ -129,7 +129,7 @@ class MCTS:
         simulations: int = 800,
         c_puct: float = 1.0,
         dirichlet_alpha: float = 0.3,
-        dirichlet_epsilon: float = 0.25
+        dirichlet_epsilon: float = 0.02
     ):
         """
         Args:
