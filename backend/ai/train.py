@@ -365,7 +365,7 @@ class Trainer:
                         progress_callback=eval_best_progress
                     )
                     
-                    if win_rate_vs_best > 0.5:
+                    if win_rate_vs_best > 0.55:
                         self._update_best_model(iteration)
                         tqdm.write(f"[迭代 {iteration}] ✓ 更新最佳模型 (vs随机:{win_rate_random*100:.0f}%, vs最佳:{win_rate_vs_best*100:.0f}%)")
                     else:
