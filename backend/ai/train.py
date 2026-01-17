@@ -238,7 +238,7 @@ class TrainConfig:
     model_path = 'models/checkpoints'  # 检查点保存目录
     best_model_path = 'models/best_model.pth'  # 最佳模型路径
     log_dir = 'logs'            # 日志目录
-    eval_interval = 5           # 评估间隔（每N轮与最佳模型对弈）
+    eval_interval = 10           # 评估间隔（每N轮与最佳模型对弈）
     eval_games = 20             # 评估对弈局数
     eval_simulations = 100      # 评估时 MCTS 模拟次数
     win_threshold = 0.55        # 更新最佳模型的胜率阈值

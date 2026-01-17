@@ -14,8 +14,9 @@
 - 🎮 **AlphaZero风格AI** - 结合MCTS与深度神经网络，实现强大的博弈能力
 - 🔄 **自我对弈训练** - 从零开始通过自我博弈持续提升棋力
 - 🌐 **现代Web界面** - 直观的Vue3前端，支持人机对弈、悔棋等功能
-- ⚡ **GPU加速支持** - 支持CUDA加速训练，大幅提升训练效率
-- 📊 **实时评估显示** - 展示AI对局面的胜率评估
+- ⚡ **多进程加速** - 支持多进程并行自对弈，大幅提升训练效率
+- 📊 **训练日志与可视化** - 自动记录训练过程，生成损失曲线和胜率图表
+- 🔁 **自动续训** - 自动检测检查点，支持断点续训
 
 ## 🎯 功能演示
 
@@ -36,7 +37,7 @@
 | PyTorch | 2.1.0 | 深度学习框架 |
 | FastAPI | 0.104.1 | 高性能Web框架 |
 | NumPy | 1.24.3 | 数值计算 |
-| Uvicorn | 0.24.0 | ASGI服务器 |
+| Matplotlib | - | 训练曲线绘制 |
 
 ### 前端
 | 技术 | 版本 | 说明 |
@@ -103,226 +104,131 @@ npm run dev
 
 ## 🧠 训练AI
 
-### 🚀 快速测试（1-2分钟）
+### 基本训练命令
+
+```bash
+cd backend
+conda activate gomoku
+python -m ai.train -n 100  # 训练100轮
+```
+
+### 🚀 快速测试（5-10分钟）
 
 验证训练流程是否正常：
 
 ```bash
-cd backend
-conda activate gomoku
-python -m ai.train --iterations 1 --episodes 2 --simulations 50 --small-network
+python -m ai.train -n 5 --samples 10 --simulations 30 --workers 4
 ```
 
-### ⚡ 轻量训练（10-30分钟）
-
-使用小型网络快速训练，适合开发调试：
-
-```bash
-cd backend
-conda activate gomoku
-python -m ai.train --iterations 10 --episodes 5 --simulations 100 --small-network
-```
-
-### 🔥 标准训练（2-4小时）
+### ⚡ 标准训练（2-4小时）
 
 平衡训练效果与时间：
 
 ```bash
-cd backend
-conda activate gomoku
-python -m ai.train --iterations 50 --episodes 20 --simulations 400
+python -m ai.train -n 50 --samples 100 --simulations 30 --workers 10
 ```
 
 ### 💪 完整训练（8-24小时）
 
-获得最佳棋力，建议使用GPU：
+获得较强棋力：
 
 ```bash
-cd backend
-conda activate gomoku
-python -m ai.train --iterations 100 --episodes 50 --simulations 800
-```
-
-### 🏆 极限训练（2-7天）
-
-追求最强棋力，需要GPU加速：
-
-```bash
-cd backend
-conda activate gomoku
-python -m ai.train --iterations 200 --episodes 200 --simulations 1600
+python -m ai.train -n 200 --samples 100 --simulations 30 --workers 10
 ```
 
 ### 训练参数说明
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--iterations` | 100 | 训练迭代次数 |
-| `--episodes` | 10 | 每轮自我对弈局数 |
-| `--simulations` | 400 | 每步MCTS模拟次数 |
+| `-n, --iterations` | 100 | 训练迭代次数 |
+| `--samples` | 100 | 每轮自对弈局数 |
+| `--simulations` | 30 | 训练时MCTS模拟次数 |
 | `--batch-size` | 256 | 训练批次大小 |
-| `--epochs` | 5 | 每轮训练epoch数 |
-| `--lr` | 0.001 | 初始学习率（余弦退火起点） |
-| `--model-dir` | models | 模型保存目录 |
-| `--small-network` | - | 使用小型网络(5层) |
-| `--device` | auto | 计算设备(auto/cpu/cuda/hybrid) |
-| `--workers` | 1 | 并行进程数（多核加速） |
-| `--buffer-size` | 50000 | 经验池最大容量 |
-| `--resume` | - | 从指定检查点恢复训练 |
-| `--auto-resume` | - | 自动从最新检查点恢复 |
-| `--eval-interval` | 5 | 评估间隔(每N轮评估一次) |
+| `--epochs` | 3 | 每轮训练epoch数 |
+| `--lr` | 1e-4 | 学习率 |
+| `--train-ratio` | 0.9 | 训练集比例 |
+| `--workers` | 10 | 并行进程数 |
+| `--eval-interval` | 10 | 评估间隔（每N轮与最佳模型对弈） |
+| `--eval-games` | 20 | 评估对弈局数 |
+| `--eval-simulations` | 100 | 评估时MCTS模拟次数 |
+| `--win-threshold` | 0.55 | 更新最佳模型的胜率阈值 |
+| `--base` | None | 指定基础模型路径 |
+| `--save-dir` | models/checkpoints | 检查点保存目录 |
+| `--best-model` | models/best_model.pth | 最佳模型路径 |
+| `--log-dir` | logs | 日志保存目录 |
 
-**学习率调度**：采用余弦退火（Cosine Annealing），学习率从 `--lr` 平滑衰减到 1e-5，避免阶梯式衰减的突变。
+### 🔄 自动续训
 
-### 🚀 多核并行训练（推荐）
-
-利用多核CPU大幅加速训练，自我对弈和评估阶段都支持并行：
+训练脚本会自动检测最新的检查点并继续训练：
 
 ```bash
-# 查看CPU核心数
-python -c "import multiprocessing; print(f'CPU核心数: {multiprocessing.cpu_count()}')"
+# 首次训练50轮
+python -m ai.train -n 50
 
-# 使用6核并行训练（推荐设置为核心数的60%）
-python -m ai.train --workers 6 --iterations 50 --episodes 20 --simulations 400
+# 继续训练100轮（自动从第50轮继续）
+python -m ai.train -n 100
 
-# 小型网络 + 多核加速（快速验证）
-python -m ai.train --workers 4 --iterations 10 --episodes 10 --simulations 100 --small-network
+# 输出示例：
+# 检测到最新检查点: 迭代 50 (models/checkpoints/50.pth)
+# 自动从检查点续训
+# 训练范围: 迭代 51 到 150
 ```
 
-**并行加速效果**：
-| 阶段 | 单进程 | 4进程 | 加速比 |
-|------|--------|-------|--------|
-| 自我对弈 (20局) | ~120s | ~35s | ~3.5x |
-| 评估 vs 随机 (10局) | ~10s | ~3s | ~3x |
-| 评估 vs 最佳 (20-40局) | ~40s | ~12s | ~3x |
+### 📊 训练日志与可视化
 
-**workers 设置建议**：
-| CPU核心数 | 推荐 workers | 说明 |
-|-----------|--------------|------|
-| 4核 | 2-3 | 保守设置 |
-| 8核 | 4-6 | 平衡设置 |
-| 10核+ | 6-8 | 高效设置 |
+每次训练会在 `logs/` 目录下创建独立的运行目录：
 
-### 🔀 混合模式（GPU训练 + CPU推理）
-
-如果有GPU，推荐使用混合模式获得最佳性能：
-
-```bash
-# GPU训练 + CPU多核自我对弈/评估
-python -m ai.train --device hybrid --workers 6 --iterations 50 --episodes 20 --simulations 400
+```
+backend/logs/
+├── run_20260118_120000/    # 第1次训练
+│   ├── train.log           # 文本日志
+│   ├── history.json        # JSON格式历史数据
+│   └── curves.png          # 训练曲线图
+│
+└── run_20260118_150000/    # 第2次训练
+    ├── train.log
+    ├── history.json
+    └── curves.png
 ```
 
-**device 选项说明**：
-| 选项 | 说明 |
-|------|------|
-| `auto` | 自动检测（默认） |
-| `cpu` | 强制使用CPU |
-| `cuda` | 强制使用GPU（全部） |
-| `hybrid` | GPU训练 + CPU推理（推荐有GPU时使用） |
+**日志内容包括：**
+- 训练配置参数
+- 每轮迭代的开始时间
+- 数据生成量（原始/增强后）
+- 每个epoch的loss（value/policy, train/val）
+- 模型评估胜率
+- 最佳模型更新记录
 
-### 使用GPU训练
-
-确保安装了CUDA版本的PyTorch:
+**从历史日志重新绘图：**
 
 ```bash
-# CUDA 11.8
-pip install torch --index-url https://download.pytorch.org/whl/cu118
-
-# CUDA 12.1
-pip install torch --index-url https://download.pytorch.org/whl/cu121
+python -m ai.train plot logs/run_20260118_120000/history.json
 ```
 
 ### 训练输出
 
 训练过程会生成以下文件：
 
-**`backend/models/` 目录**：
-- `checkpoint_{iter}.pth` - 每隔几轮保存的检查点（包含完整训练状态）
-- `best_model.pth` - 当前最佳模型（AlphaZero风格选择）
-- `training_stats.json` - 训练统计信息
-
-**`backend/data/` 目录**：
-- `replay_buffer.pkl` - 经验回放池（用于断点续训）
-
-### 🔄 断点续训
-
-支持从检查点恢复训练，保留完整的训练状态（网络权重、优化器状态、学习率调度器、经验回放池）。
-
-#### 续训命令
-
-```bash
-cd backend
-conda activate gomoku
-
-# 方式1：手动指定检查点
-python -m ai.train --resume models/checkpoint_10.pth --iterations 50
-
-# 方式2：自动从最新检查点恢复（推荐）
-python -m ai.train --auto-resume --iterations 50
-
-# 结合多核加速
-python -m ai.train --auto-resume --workers 6 --iterations 100 --episodes 20
 ```
-
-#### 检查点保存内容
-
-| 内容 | 说明 |
-|------|------|
-| 网络权重 | 神经网络参数 |
-| 优化器状态 | Adam 动量等 |
-| 学习率调度器 | 当前学习率位置 |
-| 迭代次数 | 从第N轮继续 |
-| 训练统计 | 历史损失、胜率等 |
-| 经验回放池 | data/replay_buffer.pkl（自动加载） |
-
-#### 参数兼容性
-
-**✅ 续训时可以修改的参数**：
-
-| 参数 | 说明 |
-|------|------|
-| `--iterations` | 可以设置新的目标迭代次数 |
-| `--episodes` | 可以调整每轮对弈局数 |
-| `--simulations` | 可以调整MCTS模拟次数 |
-| `--batch-size` | 可以调整训练批次大小 |
-| `--epochs` | 可以调整每轮训练epoch数 |
-| `--workers` | 可以调整并行进程数 |
-| `--device` | 可以切换设备（cpu/cuda/hybrid） |
-| `--eval-interval` | 可以调整评估间隔 |
-
-**❌ 续训时不能修改的参数**：
-
-| 参数 | 原因 |
-|------|------|
-| `--small-network` | 网络结构必须与检查点一致 |
-| `--lr` | 会被调度器状态覆盖（但可以手动重置调度器） |
-| `--model-dir` | 建议保持一致，避免混乱 |
-
-**⚠️ 注意事项**：
-- 使用 `--auto-resume` 时，会自动检测网络类型是否匹配
-- 如果检查点与当前 `--small-network` 参数不匹配，会报错并提示
-- 经验回放池从 `data/replay_buffer.pkl` 自动加载，无需手动指定
-
-#### 续训示例场景
-
-```bash
-# 场景1：之前用小网络训练了10轮，继续训练到50轮
-python -m ai.train --small-network --auto-resume --iterations 50
-
-# 场景2：增加每轮对弈局数，加速数据收集
-python -m ai.train --auto-resume --episodes 30 --iterations 100
-
-# 场景3：切换到GPU训练（如果之前用CPU）
-python -m ai.train --auto-resume --device cuda --iterations 100
-
-# 场景4：增加MCTS模拟次数提高数据质量
-python -m ai.train --auto-resume --simulations 800 --iterations 100
+backend/
+├── models/
+│   ├── checkpoints/        # 每轮训练的检查点
+│   │   ├── 1.pth
+│   │   ├── 2.pth
+│   │   └── ...
+│   └── best_model.pth      # 当前最佳模型
+│
+└── logs/
+    └── run_YYYYMMDD_HHMMSS/
+        ├── train.log       # 训练日志
+        ├── history.json    # 历史数据
+        └── curves.png      # 训练曲线
 ```
 
 ### 最佳模型选择策略
 
 采用 **AlphaZero 风格**的模型选择：
-1. 每轮训练后，新模型与当前最佳模型对弈 20 局
+1. 每隔 `eval_interval` 轮，新模型与当前最佳模型对弈
 2. 只有当新模型胜率 > 55% 时，才更新 `best_model.pth`
 3. 确保模型持续进步，避免过拟合导致性能下降
 
@@ -332,42 +238,46 @@ python -m ai.train --auto-resume --simulations 800 --iterations 100
 Gomoku-AI/
 ├── backend/
 │   ├── main.py                 # FastAPI入口，Web API实现
+│   ├── requirements.txt        # Python依赖
 │   ├── game/
 │   │   ├── __init__.py
-│   │   ├── board.py            # 棋盘类：落子、悔棋、状态编码
-│   │   └── rules.py            # 规则判断：胜负检测、合法性检查
+│   │   └── board.py            # 棋盘类：落子、悔棋、状态管理
 │   ├── ai/
 │   │   ├── __init__.py
-│   │   ├── network.py          # PyTorch神经网络：残差网络架构
-│   │   ├── mcts.py             # MCTS实现：UCB选择、回溯更新
-│   │   ├── train.py            # 训练循环：自我对弈→训练→评估
-│   │   └── self_play.py        # 自我对弈：数据生成、数据增强
-│   ├── models/                 # 模型保存目录（检查点、最佳模型）
-│   ├── data/                   # 训练数据目录（经验回放池）
-│   └── requirements.txt        # Python依赖
+│   │   ├── network.py          # 神经网络：策略价值网络(残差架构)
+│   │   ├── mcts.py             # MCTS实现：UCB选择、训练数据收集
+│   │   └── train.py            # 训练脚本：自对弈、训练、评估、日志
+│   ├── models/                 # 模型保存目录
+│   │   ├── checkpoints/        # 训练检查点
+│   │   └── best_model.pth      # 最佳模型
+│   └── logs/                   # 训练日志目录
+│       └── run_YYYYMMDD_HHMMSS/
 │
 ├── frontend/
 │   ├── src/
 │   │   ├── components/
-│   │   │   ├── Board.vue       # 棋盘组件：Canvas绘制、点击事件
-│   │   │   ├── GameControl.vue # 控制面板：新游戏、悔棋
-│   │   │   └── StatsPanel.vue  # 统计面板：胜率、模型信息
+│   │   │   ├── Board.vue       # 棋盘组件
+│   │   │   ├── GameControl.vue # 控制面板
+│   │   │   └── StatsPanel.vue  # 统计面板
 │   │   ├── views/
 │   │   │   └── Game.vue        # 游戏主页面
 │   │   ├── stores/
 │   │   │   └── game.ts         # Pinia状态管理
 │   │   ├── api/
 │   │   │   └── game.ts         # API调用封装
-│   │   ├── App.vue             # 根组件
-│   │   ├── main.ts             # 入口文件
-│   │   └── style.css           # 全局样式
+│   │   ├── App.vue
+│   │   ├── main.ts
+│   │   └── style.css
 │   ├── index.html
 │   ├── package.json
 │   ├── vite.config.ts
 │   └── tsconfig.json
 │
-├── README.md
-└── .gitignore
+├── other/                      # 参考脚本
+│   ├── nn_012.py               # 原始训练脚本
+│   └── gmk_run_0629.py         # 原始运行脚本
+│
+└── README.md
 ```
 
 ## 🔌 API接口
@@ -381,13 +291,6 @@ Gomoku-AI/
 | GET | `/api/game/{id}/state` | 获取当前棋盘状态 |
 | POST | `/api/game/{id}/undo` | 悔棋（撤销双方各一步） |
 | DELETE | `/api/game/{id}` | 删除游戏 |
-
-### 模型接口
-
-| 方法 | 端点 | 说明 |
-|------|------|------|
-| GET | `/api/model/info` | 获取模型信息 |
-| POST | `/api/model/reload` | 重新加载模型 |
 
 ### API示例
 
@@ -408,42 +311,39 @@ curl -X POST "http://localhost:8000/api/game/{game_id}/move" \
 ## 🧬 网络架构
 
 ```
-输入: (batch, 3, 15, 15)
-  ├── 通道0: 当前玩家棋子位置
-  ├── 通道1: 对手棋子位置
-  └── 通道2: 当前玩家标识（全1=黑方，全0=白方）
+输入: (batch, 2, 15, 15)
+  ├── 通道0: 当前玩家棋子位置 (1)
+  └── 通道1: 对手棋子位置 (-1 → 1)
         │
         ▼
 ┌─────────────────────────────────┐
-│  Conv2d(3→64, 3×3) + BN + ReLU  │  初始卷积层
+│  Conv2d(2→32, 3×3) + BN + ReLU  │  初始卷积层
 └─────────────────────────────────┘
         │
         ▼
 ┌─────────────────────────────────┐
-│     ResBlock × 10               │  残差块（可配置5-10层）
+│     ResBlock × 5                │  残差块
 │  ┌─────────────────────────┐    │
-│  │ Conv(64,64) → BN → ReLU │    │
-│  │ Conv(64,64) → BN        │    │
+│  │ Conv(32,32) → BN → ReLU │    │
+│  │ Conv(32,32) → BN        │    │
 │  │      + skip connection  │    │
 │  └─────────────────────────┘    │
 └─────────────────────────────────┘
         │
-        ├─────────────┬─────────────┐
-        ▼             ▼             
-┌───────────────┐ ┌───────────────┐
-│   策略头      │ │   价值头      │
-│ Conv(64→2)    │ │ Conv(64→1)    │
-│ Flatten       │ │ Flatten       │
-│ Linear(225)   │ │ Linear(256)   │
-│ Softmax       │ │ Linear(1)     │
-│               │ │ Tanh          │
-└───────────────┘ └───────────────┘
-        │                 │
-        ▼                 ▼
-  落子概率[225]     局面价值[-1,1]
+        ├─────────────────────────┐
+        ▼                         ▼
+┌───────────────┐         ┌───────────────┐
+│   价值头      │         │   策略头      │
+│ Conv(32→1)    │         │ Conv(32→1)    │
+│ Flatten       │         │ Flatten       │
+│ Linear(64)    │         │ Softmax       │
+│ Linear(1)     │         │               │
+│ Tanh          │         │               │
+└───────────────┘         └───────────────┘
+        │                         │
+        ▼                         ▼
+  局面价值[-1,1]            落子概率[225]
 ```
-
-**网络参数量:** 约1-3M（取决于残差块数量）
 
 ## 📈 MCTS算法
 
@@ -454,33 +354,35 @@ $$UCB = Q + c_{puct} \cdot P \cdot \frac{\sqrt{\sum N_{parent}}}{1 + N}$$
 - $Q$: 平均价值（累计价值/访问次数）
 - $P$: 先验概率（来自策略网络）
 - $N$: 节点访问次数
-- $c_{puct}$: 探索常数（默认2.0）
+- $c_{puct}$: 探索常数（默认0.8）
 
 ### Dirichlet噪声
 
-根节点添加噪声增加探索：
+训练时根节点添加噪声增加探索：
 
-$$P_{root} = 0.75 \cdot P + 0.25 \cdot Dir(\alpha)$$
+$$P_{root} = (1 - \epsilon) \cdot P + \epsilon \cdot Dir(\alpha)$$
 
-其中 $\alpha = 0.3$
-
-## ✅ 验收标准
-
-- [x] AI能在100次训练迭代后战胜随机玩家（胜率>90%）
-- [x] Web界面流畅，落子响应<2秒
-- [x] 代码包含必要注释和文档字符串
-- [x] 提供训练脚本和使用说明
+其中 $\epsilon = 0.01$, $\alpha = 0.3$
 
 ## 🔧 常见问题
 
 ### Q: 训练时间太长怎么办？
-A: 使用 `--small-network` 参数启用小型网络，减少 `--simulations` 和 `--episodes` 参数值。
+A: 减少 `--samples` 和 `--simulations` 参数值，或增加 `--workers` 使用更多进程并行。
 
 ### Q: 如何使用已训练的模型？
 A: 将模型文件放入 `backend/models/best_model.pth`，重启后端服务即可自动加载。
 
 ### Q: 前端无法连接后端？
 A: 确保后端运行在8000端口，检查 `vite.config.ts` 中的代理配置。
+
+### Q: 如何查看训练进度？
+A: 查看 `logs/run_xxx/` 目录下的 `train.log` 文件和 `curves.png` 图表。
+
+### Q: 如何从指定检查点继续训练？
+A: 使用 `--base` 参数指定模型路径：
+```bash
+python -m ai.train -n 100 --base models/checkpoints/50.pth
+```
 
 ## 📄 许可证
 
