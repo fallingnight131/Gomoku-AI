@@ -693,11 +693,11 @@ def train(start_iter=0, end_iter=100, config: TrainConfig = None, logger: TrainL
         total=total_iterations,
         desc="🎮 训练进度",
         unit="轮",
-        ncols=80,
-        bar_format='{desc}: {percentage:3.0f}%|{bar:10}| {n}/{total}轮 [{elapsed}<{remaining}] {postfix}',
+        ncols=120,
+        bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n}/{total}轮 [{elapsed}<{remaining}] {postfix}',
         position=0,
         leave=True,
-        dynamic_ncols=True
+        dynamic_ncols=False
     )
     
     # 进度回调函数
