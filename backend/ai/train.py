@@ -19,8 +19,8 @@ from datetime import datetime
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-from network import PolicyValueNetwork, board_to_tensor, BOARD_SIZE
-from mcts import MCTS, Node, check_winner
+from .network import PolicyValueNetwork, board_to_tensor, BOARD_SIZE
+from .mcts import MCTS, Node, check_winner
 
 
 # ==================== 训练日志 ====================
@@ -55,14 +55,19 @@ class TrainLogger:
         self._write_log(f"日志目录: {self.run_dir}")
         self._write_log("=" * 60)
     
-    def _write_log(self, message: str):
-        """写入日志文件"""
+    def _write_log(self, message: str, to_terminal: bool = False):
+        """写入日志文件，可选输出到终端"""
         with open(self.log_file, 'a', encoding='utf-8') as f:
             f.write(message + '\n')
-        print(message)
+        if to_terminal:
+            tqdm.write(message)
+    
+    def print_terminal(self, message: str):
+        """仅输出到终端（也记录到日志）"""
+        self._write_log(message, to_terminal=True)
     
     def log_config(self, config):
-        """记录训练配置"""
+        """记录训练配置（仅写日志文件）"""
         self._write_log("\n训练配置:")
         self._write_log(f"  batch_size: {config.batch_size}")
         self._write_log(f"  num_epochs: {config.num_epochs}")
@@ -102,8 +107,6 @@ class TrainLogger:
         self.history['train_policy_loss'].append(train_policy)
         self.history['val_value_loss'].append(val_value)
         self.history['val_policy_loss'].append(val_policy)
-        
-        self._write_log(f"检查点已保存: {iteration}.pth")
         self._save_json()
     
     def log_evaluation(self, iteration: int, win_rate: float, 
@@ -136,14 +139,19 @@ class TrainLogger:
         with open(self.json_file, 'w', encoding='utf-8') as f:
             json.dump(self.history, f, indent=2)
     
-    def plot_curves(self, save_path: str = None):
+    def plot_curves(self, save_path: str = None, silent: bool = False):
         """绘制训练曲线"""
         if not self.history['iterations']:
-            print("没有数据可绘制")
+            if not silent:
+                print("没有数据可绘制")
             return
         
+        # 设置支持中文的字体
+        plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei', 'DejaVu Sans']
+        plt.rcParams['axes.unicode_minus'] = False
+        
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        fig.suptitle('训练曲线', fontsize=14)
+        fig.suptitle('Training Curves', fontsize=14)
         
         iterations = self.history['iterations']
         
@@ -186,7 +194,7 @@ class TrainLogger:
         if self.history['eval_iterations']:
             ax4.plot(self.history['eval_iterations'], 
                     [r * 100 for r in self.history['eval_win_rates']], 
-                    'g-o', linewidth=1.5, markersize=4)
+                    'g-o', linewidth=1.5, markersize=4, label='Win Rate')
             ax4.axhline(y=55, color='r', linestyle='--', label='Threshold (55%)', alpha=0.7)
             # 标记更新最佳模型的点
             for update_iter in self.history['best_model_updates']:
@@ -195,10 +203,12 @@ class TrainLogger:
                     ax4.scatter([update_iter], 
                                [self.history['eval_win_rates'][idx] * 100],
                                color='red', s=100, zorder=5, marker='*')
+            ax4.legend()
+        else:
+            ax4.text(0.5, 0.5, 'No evaluation data yet', ha='center', va='center', transform=ax4.transAxes)
         ax4.set_xlabel('Iteration')
         ax4.set_ylabel('Win Rate (%)')
         ax4.set_title('Win Rate vs Best Model')
-        ax4.legend()
         ax4.grid(True, alpha=0.3)
         ax4.set_ylim(0, 100)
         
@@ -208,7 +218,8 @@ class TrainLogger:
             save_path = self.curve_file
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
-        print(f"训练曲线已保存: {save_path}")
+        if not silent:
+            tqdm.write(f"训练曲线已保存: {save_path}")
     
     @staticmethod
     def load_and_plot(json_path: str, save_path: str = None):
@@ -311,15 +322,27 @@ def calc_next_move(board, probs, temperature=0):
             if board[i][j] == 0:
                 valid_moves.append((i, j, probs[i][j]))
     
+    if not valid_moves:
+        return None
+    
     if temperature == 0:
         valid_moves.sort(key=lambda x: x[2], reverse=True)
         return valid_moves[0][:2]
     else:
         moves = [(i, j) for i, j, _ in valid_moves]
         ps = np.array([p for _, _, p in valid_moves], dtype=np.float64)
+        
+        # 处理温度缩放
         if temperature != 1.0:
             ps = ps ** (1.0 / temperature)
-        ps = ps / (ps.sum() + 1e-10)
+        
+        # 确保概率有效且归一化
+        ps = np.clip(ps, 1e-10, None)  # 避免零概率
+        ps = ps / ps.sum()  # 归一化
+        
+        # 修复浮点精度问题：确保概率和精确为1
+        ps = ps / ps.sum()
+        
         idx = np.random.choice(len(moves), p=ps)
         return moves[idx]
 
@@ -370,8 +393,8 @@ def augment_data(boards, policies, values, weights):
     aug_boards, aug_policies, aug_values, aug_weights = [], [], [], []
     
     for board, policy, value, weight in zip(boards, policies, values, weights):
-        value_t = torch.tensor(value).float()
-        weight_t = torch.tensor(weight).float()
+        value_t = value.clone().detach().float() if isinstance(value, torch.Tensor) else torch.tensor(value).float()
+        weight_t = weight.clone().detach().float() if isinstance(weight, torch.Tensor) else torch.tensor(weight).float()
         
         for k in range(4):
             for flip in [False, True]:
@@ -395,7 +418,7 @@ def augment_data(boards, policies, values, weights):
     )
 
 
-def generate_selfplay_data(model, config: TrainConfig):
+def generate_selfplay_data(model, config: TrainConfig, progress_callback=None):
     """生成自对弈训练数据"""
     model_state_dict = model.state_dict()
     
@@ -405,11 +428,12 @@ def generate_selfplay_data(model, config: TrainConfig):
             model_state_dict=model_state_dict,
             num_simulations=config.train_simulation
         )
-        results = list(tqdm(
-            pool.imap(func, range(config.num_samples)),
-            total=config.num_samples,
-            desc="生成自对弈数据"
-        ))
+        
+        results = []
+        for i, result in enumerate(pool.imap(func, range(config.num_samples))):
+            results.append(result)
+            if progress_callback:
+                progress_callback('selfplay', i + 1, config.num_samples)
     
     # 整合数据
     boards, policies, values, weights = [], [], [], []
@@ -424,20 +448,18 @@ def generate_selfplay_data(model, config: TrainConfig):
     values = torch.FloatTensor(values)
     weights = torch.FloatTensor(weights)
     
-    print(f"原始数据量: {len(boards)}")
+    raw_count = len(boards)
     
     # 数据增强
     boards, policies, values, weights = augment_data(boards, policies, values, weights)
     
-    print(f"增强后数据量: {len(boards)}")
-    
-    return boards, policies, values, weights
+    return boards, policies, values, weights, raw_count
 
 
 # ==================== 训练 ====================
 
 def train_model(model, train_loader, val_loader, config: TrainConfig, 
-                logger: TrainLogger = None, iteration: int = 0):
+                logger: TrainLogger = None, iteration: int = 0, progress_callback=None):
     """
     训练模型
     
@@ -460,13 +482,15 @@ def train_model(model, train_loader, val_loader, config: TrainConfig,
     final_losses = (0, 0, 0, 0)
     
     for epoch in range(config.num_epochs):
+        # 更新进度显示
+        if progress_callback:
+            progress_callback('train', epoch + 1, config.num_epochs, (epoch + 1, config.num_epochs))
+        
         # 训练阶段
         model.train()
         train_value_loss, train_policy_loss = 0, 0
         
-        for batch_boards, batch_policies, batch_values, batch_weights in tqdm(
-            train_loader, desc=f'Epoch {epoch+1}/{config.num_epochs}'
-        ):
+        for batch_boards, batch_policies, batch_values, batch_weights in train_loader:
             batch_boards = batch_boards.to(device)
             batch_policies = batch_policies.to(device).view(batch_policies.size(0), -1)
             batch_values = batch_values.to(device).unsqueeze(1)
@@ -517,14 +541,11 @@ def train_model(model, train_loader, val_loader, config: TrainConfig,
         
         final_losses = (avg_train_value, avg_train_policy, avg_val_value, avg_val_policy)
         
-        # 记录日志
+        # 记录日志（仅写文件）
         if logger:
             logger.log_epoch(iteration, epoch + 1, config.num_epochs,
                            avg_train_value, avg_train_policy,
                            avg_val_value, avg_val_policy)
-        else:
-            print(f"  Train - Value: {avg_train_value:.4f}, Policy: {avg_train_policy:.4f}")
-            print(f"  Val   - Value: {avg_val_value:.4f}, Policy: {avg_val_policy:.4f}")
         
         # 学习率调度
         val_total_loss = 2 * avg_val_value + avg_val_policy
@@ -547,7 +568,7 @@ def calc_next_move_eval(board, probs):
     return best_move
 
 
-def evaluate_vs_model(model1, model2, device, config: TrainConfig) -> float:
+def evaluate_vs_model(model1, model2, device, config: TrainConfig, progress_callback=None) -> float:
     """
     两个模型对弈评估
     
@@ -596,6 +617,9 @@ def evaluate_vs_model(model1, model2, device, config: TrainConfig) -> float:
                 for j in range(BOARD_SIZE):
                     board[i][j] *= -1
             current_is_model1 = not current_is_model1
+        
+        if progress_callback:
+            progress_callback('eval', game_idx + 1, config.eval_games, model1_wins)
     
     # 计算胜率（平局算 0.5 胜）
     win_rate = (model1_wins + draws * 0.5) / config.eval_games
@@ -603,6 +627,11 @@ def evaluate_vs_model(model1, model2, device, config: TrainConfig) -> float:
 
 
 # ==================== 主训练函数 ====================
+
+def count_parameters(model):
+    """计算模型参数量"""
+    return sum(p.numel() for p in model.parameters())
+
 
 def train(start_iter=0, end_iter=100, config: TrainConfig = None, logger: TrainLogger = None):
     """主训练函数"""
@@ -614,7 +643,14 @@ def train(start_iter=0, end_iter=100, config: TrainConfig = None, logger: TrainL
         logger = TrainLogger(config.log_dir)
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    logger._write_log(f"使用设备: {device}")
+    
+    # 简洁终端输出：设备信息
+    if device.type == 'cuda':
+        gpu_name = torch.cuda.get_device_name(0)
+        logger.print_terminal(f"🚀 训练设备: GPU ({gpu_name})")
+    else:
+        logger.print_terminal(f"🚀 训练设备: CPU")
+    
     logger.log_config(config)
     
     # 创建目录
@@ -630,26 +666,66 @@ def train(start_iter=0, end_iter=100, config: TrainConfig = None, logger: TrainL
     
     model.to(device)
     
+    # 输出参数量
+    param_count = count_parameters(model)
+    logger.print_terminal(f"网络参数量: {param_count:,}")
+    
     # 加载或初始化最佳模型
     best_model = PolicyValueNetwork()
     if os.path.exists(config.best_model_path):
         best_model.load_state_dict(torch.load(config.best_model_path, map_location=device, weights_only=True))
-        logger._write_log(f"加载最佳模型: {config.best_model_path}")
+        logger.print_terminal(f"加载已有最佳模型: {config.best_model_path}")
     else:
-        # 首次训练，使用当前模型作为最佳模型
+        # 首次训练，直接保存当前模型为最佳模型
         best_model.load_state_dict(model.state_dict())
-        logger._write_log("未找到最佳模型，使用初始权重")
+        torch.save(model.state_dict(), config.best_model_path)
+        logger.print_terminal(f"未找到已有最佳模型，初始化并保存: {config.best_model_path}")
     best_model.to(device)
+    
+    total_iterations = end_iter - start_iter
+    
+    # 统一进度条
+    pbar = tqdm(
+        total=total_iterations,
+        desc="🎮 训练进度",
+        unit="轮",
+        ncols=80,
+        bar_format='{desc}: {percentage:3.0f}%|{bar:10}| {n}/{total}轮 [{elapsed}<{remaining}] {postfix}',
+        position=0,
+        leave=True,
+        dynamic_ncols=True
+    )
+    
+    # 进度回调函数
+    def update_status(phase, current, total, extra=None):
+        if phase == 'selfplay':
+            pbar.set_postfix_str(f"自对弈 {current}/{total}局", refresh=True)
+        elif phase == 'train':
+            # extra 包含 (current_epoch, total_epochs)
+            if extra:
+                epoch, total_epochs = extra
+                pbar.set_postfix_str(f"训练 Epoch {epoch}/{total_epochs}", refresh=True)
+            else:
+                pbar.set_postfix_str("训练中...", refresh=True)
+        elif phase == 'eval':
+            wins = extra if extra else 0
+            pbar.set_postfix_str(f"vs最佳 {current}/{total}局 胜{wins}", refresh=True)
     
     try:
         for iteration in range(start_iter, end_iter):
-            logger.log_iteration_start(iteration + 1)
+            iter_num = iteration + 1
+            iter_start_time = datetime.now()
+            
+            logger.log_iteration_start(iter_num)
             
             model.eval()
             
             # 生成自对弈数据
-            boards, policies, values, weights = generate_selfplay_data(model, config)
-            logger.log_data_generation(len(boards) // 8, len(boards))  # 增强前/后
+            update_status('selfplay', 0, config.num_samples)
+            boards, policies, values, weights, raw_count = generate_selfplay_data(
+                model, config, progress_callback=update_status
+            )
+            logger.log_data_generation(raw_count, len(boards))
             
             # 划分训练集和验证集
             num_train = int(len(boards) * config.train_ratio)
@@ -667,34 +743,63 @@ def train(start_iter=0, end_iter=100, config: TrainConfig = None, logger: TrainL
             val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
             
             # 训练模型
-            losses = train_model(model, train_loader, val_loader, config, logger, iteration + 1)
+            update_status('train', 0, len(train_loader) * config.num_epochs)
+            losses = train_model(model, train_loader, val_loader, config, logger, iter_num,
+                               progress_callback=update_status)
+            
+            # 计算总损失
+            total_loss = 2 * losses[0] + losses[1]
             
             # 保存检查点
-            checkpoint_path = os.path.join(config.model_path, f"{iteration + 1}.pth")
+            checkpoint_path = os.path.join(config.model_path, f"{iter_num}.pth")
             torch.save(model.state_dict(), checkpoint_path)
             
             # 记录迭代结束
-            logger.log_iteration_end(iteration + 1, *losses)
+            logger.log_iteration_end(iter_num, *losses)
+            
+            # 计算迭代时间
+            iter_time = (datetime.now() - iter_start_time).total_seconds()
             
             # 评估：每 eval_interval 轮与最佳模型对弈
-            if (iteration + 1) % config.eval_interval == 0:
-                win_rate = evaluate_vs_model(model, best_model, device, config)
+            eval_info = ""
+            if iter_num % config.eval_interval == 0:
+                update_status('eval', 0, config.eval_games, 0)
+                win_rate = evaluate_vs_model(model, best_model, device, config,
+                                            progress_callback=update_status)
                 updated_best = win_rate > config.win_threshold
                 
                 if updated_best:
                     torch.save(model.state_dict(), config.best_model_path)
                     best_model.load_state_dict(model.state_dict())
+                    eval_info = f" ✓ 更新最佳模型 (胜率{win_rate*100:.0f}%)"
+                else:
+                    eval_info = f" ✗ 保留旧模型 (胜率{win_rate*100:.0f}%)"
                 
-                logger.log_evaluation(iteration + 1, win_rate, updated_best, config.win_threshold)
+                logger.log_evaluation(iter_num, win_rate, updated_best, config.win_threshold)
             
-            # 每轮结束后更新曲线图
-            logger.plot_curves()
+            # 简洁终端输出
+            tqdm.write(
+                f"[迭代 {iter_num}] 样本: {len(boards)}, "
+                f"时间: {iter_time:.1f}s, loss: {total_loss:.4f}{eval_info}"
+            )
+            
+            # 更新进度条
+            pbar.update(1)
+            pbar.set_postfix_str("")
+            
+            # 每轮结束后更新曲线图（静默）
+            logger.plot_curves(silent=True)
         
+        pbar.close()
+        tqdm.write(f"\n✅ 训练完成! 最佳模型: {config.best_model_path}")
+        tqdm.write(f"📊 训练曲线: {logger.curve_file}")
         logger.log_training_complete(config.best_model_path)
         
     except KeyboardInterrupt:
+        pbar.close()
+        tqdm.write("\n⚠️ 训练被用户中断")
         logger._write_log("\n训练被用户中断")
-        logger.plot_curves()
+        logger.plot_curves(silent=True)
     
     return model
 
@@ -730,70 +835,57 @@ def find_latest_checkpoint(checkpoint_dir: str) -> tuple[int, str | None]:
 
 if __name__ == "__main__":
     import argparse
+    import sys
     
-    parser = argparse.ArgumentParser(description="五子棋 AI 训练")
-    subparsers = parser.add_subparsers(dest='command', help='可用命令')
-    
-    # ===== 训练命令 =====
-    train_parser = subparsers.add_parser('train', help='开始训练')
-    
-    # 迭代控制
-    train_parser.add_argument("--iterations", "-n", type=int, default=100, help="训练迭代次数")
-    
-    # 训练参数
-    train_parser.add_argument("--samples", type=int, default=100, help="每轮自对弈局数")
-    train_parser.add_argument("--simulations", type=int, default=30, help="MCTS 模拟次数")
-    train_parser.add_argument("--batch-size", type=int, default=256, help="训练批次大小")
-    train_parser.add_argument("--epochs", type=int, default=3, help="每轮训练 epoch 数")
-    train_parser.add_argument("--lr", type=float, default=1e-4, help="学习率")
-    train_parser.add_argument("--train-ratio", type=float, default=0.9, help="训练集比例")
-    
-    # 评估参数
-    train_parser.add_argument("--eval-interval", type=int, default=10, help="评估间隔（每N轮与最佳模型对弈）")
-    train_parser.add_argument("--eval-games", type=int, default=20, help="评估对弈局数")
-    train_parser.add_argument("--eval-simulations", type=int, default=100, help="评估时 MCTS 模拟次数")
-    train_parser.add_argument("--win-threshold", type=float, default=0.55, help="更新最佳模型的胜率阈值")
-    
-    # 并行与路径
-    train_parser.add_argument("--workers", type=int, default=10, help="并行进程数")
-    train_parser.add_argument("--base", type=str, default=None, help="基础模型路径")
-    train_parser.add_argument("--save-dir", type=str, default="models/checkpoints", help="检查点保存目录")
-    train_parser.add_argument("--best-model", type=str, default="models/best_model.pth", help="最佳模型路径")
-    train_parser.add_argument("--log-dir", type=str, default="logs", help="日志保存目录")
-    
-    # ===== 绘图命令 =====
-    plot_parser = subparsers.add_parser('plot', help='从日志绘制训练曲线')
-    plot_parser.add_argument("json_file", type=str, help="训练日志的 JSON 文件路径")
-    plot_parser.add_argument("--output", "-o", type=str, default=None, help="输出图片路径")
-    
-    args = parser.parse_args()
-    
-    # 处理绘图命令
-    if args.command == 'plot':
+    # 检查是否是绘图命令
+    if len(sys.argv) >= 2 and sys.argv[1] == 'plot':
+        # 绘图模式
+        plot_parser = argparse.ArgumentParser(description="绘制训练曲线")
+        plot_parser.add_argument("command", choices=['plot'])
+        plot_parser.add_argument("json_file", type=str, help="训练日志的 JSON 文件路径")
+        plot_parser.add_argument("--output", "-o", type=str, default=None, help="输出图片路径")
+        
+        args = plot_parser.parse_args()
         TrainLogger.load_and_plot(args.json_file, args.output)
     
-    # 处理训练命令（或无命令时默认训练）
-    elif args.command == 'train' or args.command is None:
-        # 如果没有子命令，重新解析为训练参数
-        if args.command is None:
-            train_parser = argparse.ArgumentParser(description="五子棋 AI 训练")
-            train_parser.add_argument("--iterations", "-n", type=int, default=100, help="训练迭代次数")
-            train_parser.add_argument("--samples", type=int, default=100, help="每轮自对弈局数")
-            train_parser.add_argument("--simulations", type=int, default=30, help="MCTS 模拟次数")
-            train_parser.add_argument("--batch-size", type=int, default=256, help="训练批次大小")
-            train_parser.add_argument("--epochs", type=int, default=3, help="每轮训练 epoch 数")
-            train_parser.add_argument("--lr", type=float, default=1e-4, help="学习率")
-            train_parser.add_argument("--train-ratio", type=float, default=0.9, help="训练集比例")
-            train_parser.add_argument("--eval-interval", type=int, default=10, help="评估间隔")
-            train_parser.add_argument("--eval-games", type=int, default=20, help="评估对弈局数")
-            train_parser.add_argument("--eval-simulations", type=int, default=100, help="评估时 MCTS 模拟次数")
-            train_parser.add_argument("--win-threshold", type=float, default=0.55, help="更新最佳模型的胜率阈值")
-            train_parser.add_argument("--workers", type=int, default=10, help="并行进程数")
-            train_parser.add_argument("--base", type=str, default=None, help="基础模型路径")
-            train_parser.add_argument("--save-dir", type=str, default="models/checkpoints", help="检查点保存目录")
-            train_parser.add_argument("--best-model", type=str, default="models/best_model.pth", help="最佳模型路径")
-            train_parser.add_argument("--log-dir", type=str, default="logs", help="日志保存目录")
-            args = train_parser.parse_args()
+    else:
+        # 训练模式（默认）
+        parser = argparse.ArgumentParser(
+            description="五子棋 AI 训练",
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog="""
+示例:
+  python -m ai.train -n 100                    # 训练 100 轮
+  python -m ai.train -n 50 --samples 200       # 50 轮，每轮 200 局自对弈
+  python -m ai.train plot logs/run_xxx/history.json  # 绘制训练曲线
+"""
+        )
+        
+        # 迭代控制
+        parser.add_argument("--iterations", "-n", type=int, default=100, help="训练迭代次数 (默认: 100)")
+        
+        # 训练参数
+        parser.add_argument("--samples", type=int, default=100, help="每轮自对弈局数 (默认: 100)")
+        parser.add_argument("--simulations", type=int, default=30, help="MCTS 模拟次数 (默认: 30)")
+        parser.add_argument("--batch-size", type=int, default=256, help="训练批次大小 (默认: 256)")
+        parser.add_argument("--epochs", type=int, default=3, help="每轮训练 epoch 数 (默认: 3)")
+        parser.add_argument("--lr", type=float, default=1e-4, help="学习率 (默认: 1e-4)")
+        parser.add_argument("--train-ratio", type=float, default=0.9, help="训练集比例 (默认: 0.9)")
+        
+        # 评估参数
+        parser.add_argument("--eval-interval", type=int, default=10, help="评估间隔 (默认: 10)")
+        parser.add_argument("--eval-games", type=int, default=20, help="评估对弈局数 (默认: 20)")
+        parser.add_argument("--eval-simulations", type=int, default=100, help="评估时 MCTS 模拟次数 (默认: 100)")
+        parser.add_argument("--win-threshold", type=float, default=0.55, help="更新最佳模型的胜率阈值 (默认: 0.55)")
+        
+        # 并行与路径
+        parser.add_argument("--workers", type=int, default=10, help="并行进程数 (默认: 10)")
+        parser.add_argument("--base", type=str, default=None, help="基础模型路径")
+        parser.add_argument("--save-dir", type=str, default="models/checkpoints", help="检查点保存目录")
+        parser.add_argument("--best-model", type=str, default="models/best_model.pth", help="最佳模型路径")
+        parser.add_argument("--log-dir", type=str, default="logs", help="日志保存目录")
+        
+        args = parser.parse_args()
         
         # 创建配置
         config = TrainConfig()
@@ -817,18 +909,19 @@ if __name__ == "__main__":
         latest_iter, latest_path = find_latest_checkpoint(config.model_path)
         
         if latest_iter > 0:
-            print(f"检测到最新检查点: 迭代 {latest_iter} ({latest_path})")
+            tqdm.write(f"检测到最新检查点: 迭代 {latest_iter} ({latest_path})")
             # 如果没有指定base，自动使用最新检查点续训
             if config.base_path is None:
                 config.base_path = latest_path
-                print(f"自动从检查点续训")
+                tqdm.write(f"自动从检查点续训")
         else:
-            print("未检测到检查点，从头开始训练")
+            tqdm.write("未检测到检查点，从头开始训练")
         
         start_iter = latest_iter
         end_iter = latest_iter + args.iterations
         
-        print(f"训练范围: 迭代 {start_iter + 1} 到 {end_iter}")
+        tqdm.write(f"训练范围: 迭代 {start_iter + 1} 到 {end_iter}")
+        tqdm.write("")  # 空行分隔
         
         # 开始训练
         train(start_iter=start_iter, end_iter=end_iter, config=config)

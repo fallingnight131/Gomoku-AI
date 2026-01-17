@@ -88,8 +88,8 @@ class GameManager:
         """加载 AI 模型，优先加载最佳模型"""
         model_dir = os.path.join(os.path.dirname(__file__), 'models')
         
-        # 优先顺序：best_model.pth > run10_2000.pth > 随机权重
-        model_files = ['best_model.pth', 'run10_2000.pth']
+        # 优先顺序：best_model.pth > 其他模型 > 随机权重
+        model_files = ['best_model.pth']
         
         for model_file in model_files:
             model_path = os.path.join(model_dir, model_file)
