@@ -3,6 +3,10 @@
 基于自对弈 + MCTS 的强化学习训练
 """
 
+import os
+# 解决 Windows 上 OpenMP 重复加载问题
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
