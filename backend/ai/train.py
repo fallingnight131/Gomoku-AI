@@ -1,911 +1,834 @@
 """
-训练模块
-实现自我对弈、网络训练、模型评估的完整循环
+五子棋 AI 模型训练脚本
+基于自对弈 + MCTS 的强化学习训练
 """
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
 import numpy as np
+import random
+import copy
 import os
-import time
-import argparse
 import json
-from typing import Optional, Dict, List, Tuple
+import multiprocessing
+from functools import partial
 from datetime import datetime
-import sys
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from game.board import Board
-from ai.network import PolicyValueNetwork, PolicyValueNetworkSmall
-from ai.mcts import MCTS, MCTSPlayer, RandomPlayer
-from ai.self_play import SelfPlayWorker, ReplayBuffer, evaluate_games_parallel
+from network import PolicyValueNetwork, board_to_tensor, BOARD_SIZE
+from mcts import MCTS, Node, check_winner
 
 
-class Trainer:
-    """
-    训练器
-    管理整个训练流程
-    """
+# ==================== 训练日志 ====================
+
+class TrainLogger:
+    """训练日志记录器"""
     
-    def __init__(
-        self,
-        model_dir: str = 'models',
-        data_dir: str = 'data',
-        use_small_network: bool = False,
-        device: str = 'auto',
-        buffer_size: int = 50000
-    ):
-        """
-        Args:
-            model_dir: 模型保存目录
-            data_dir: 数据保存目录（经验池等）
-            use_small_network: 是否使用小型网络
-            device: 计算设备 ('auto', 'cpu', 'cuda', 'hybrid')
-                   'hybrid' = GPU训练 + CPU自我对弈/评估（推荐有GPU时使用）
-        """
-        self.model_dir = model_dir
-        self.data_dir = data_dir
-        os.makedirs(model_dir, exist_ok=True)
-        os.makedirs(data_dir, exist_ok=True)
-        self.use_small_network = use_small_network
+    def __init__(self, log_dir: str = 'logs'):
+        # 创建带时间戳的训练专属目录
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.run_dir = os.path.join(log_dir, f'run_{timestamp}')
+        os.makedirs(self.run_dir, exist_ok=True)
         
-        # 设置设备
-        self.hybrid_mode = (device == 'hybrid')
+        # 日志文件路径
+        self.log_file = os.path.join(self.run_dir, 'train.log')
+        self.json_file = os.path.join(self.run_dir, 'history.json')
+        self.curve_file = os.path.join(self.run_dir, 'curves.png')
         
-        if device == 'hybrid':
-            # 混合模式：GPU训练，CPU推理
-            if torch.cuda.is_available():
-                self.device = 'cuda'
-                self.inference_device = 'cpu'
-                device_name = torch.cuda.get_device_name(0)
-                print(f"🚀 混合模式: GPU训练 ({device_name}) + CPU自我对弈/评估")
-            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                self.device = 'mps'
-                self.inference_device = 'cpu'
-                print(f"🚀 混合模式: MPS训练 + CPU自我对弈/评估")
-            else:
-                self.device = 'cpu'
-                self.inference_device = 'cpu'
-                self.hybrid_mode = False
-                print(f"💻 使用设备: CPU (未检测到GPU，无法使用混合模式)")
-        elif device == 'auto':
-            if torch.cuda.is_available():
-                self.device = 'cuda'
-                device_name = torch.cuda.get_device_name(0)
-                print(f"🚀 使用设备: GPU ({device_name})")
-            else:
-                self.device = 'cpu'
-                if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                    print(f"💻 使用设备: CPU (提示: 检测到MPS可用但MCTS场景下CPU更快)")
-                else:
-                    print(f"💻 使用设备: CPU")
-            self.inference_device = self.device
-        else:
-            self.device = device
-            self.inference_device = device
-            print(f"使用设备: {self.device}")
-        
-        # 创建网络
-        if use_small_network:
-            self.network = PolicyValueNetworkSmall()
-        else:
-            self.network = PolicyValueNetwork()
-        
-        self.network.to(self.device)
-        print(f"网络参数量: {self.network.count_parameters():,}")
-        
-        # 最佳模型 - 尝试加载已有的best_model
-        self.best_network: Optional[PolicyValueNetwork] = None
-        self._load_best_model_if_exists(use_small_network)
-        
-        # 经验回放缓冲区
-        self.replay_buffer = ReplayBuffer(max_size=buffer_size)
-        
-        # 训练统计
-        self.stats = {
-            'iteration': 0,
-            'total_games': 0,
-            'win_rate_vs_random': 0.0,
-            'losses': [],
-            'best_model_iteration': 0
+        # 训练历史数据
+        self.history = {
+            'iterations': [],
+            'train_value_loss': [],
+            'train_policy_loss': [],
+            'val_value_loss': [],
+            'val_policy_loss': [],
+            'eval_win_rates': [],
+            'eval_iterations': [],
+            'best_model_updates': []
         }
+        
+        self._write_log(f"训练日志开始 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        self._write_log(f"日志目录: {self.run_dir}")
+        self._write_log("=" * 60)
     
-    def _get_cpu_network(self) -> PolicyValueNetwork:
-        """
-        获取CPU版本的网络（用于自我对弈和评估）
-        将当前训练网络的权重复制到CPU网络
-        """
-        if self.use_small_network:
-            cpu_network = PolicyValueNetworkSmall()
+    def _write_log(self, message: str):
+        """写入日志文件"""
+        with open(self.log_file, 'a', encoding='utf-8') as f:
+            f.write(message + '\n')
+        print(message)
+    
+    def log_config(self, config):
+        """记录训练配置"""
+        self._write_log("\n训练配置:")
+        self._write_log(f"  batch_size: {config.batch_size}")
+        self._write_log(f"  num_epochs: {config.num_epochs}")
+        self._write_log(f"  learning_rate: {config.learning_rate}")
+        self._write_log(f"  num_samples: {config.num_samples}")
+        self._write_log(f"  train_simulation: {config.train_simulation}")
+        self._write_log(f"  eval_interval: {config.eval_interval}")
+        self._write_log(f"  eval_games: {config.eval_games}")
+        self._write_log(f"  win_threshold: {config.win_threshold}")
+        self._write_log("")
+    
+    def log_iteration_start(self, iteration: int):
+        """记录迭代开始"""
+        self._write_log(f"\n{'='*50}")
+        self._write_log(f"训练迭代 {iteration}")
+        self._write_log(f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        self._write_log(f"{'='*50}")
+    
+    def log_data_generation(self, raw_count: int, augmented_count: int):
+        """记录数据生成"""
+        self._write_log(f"数据生成: 原始 {raw_count} -> 增强后 {augmented_count}")
+    
+    def log_epoch(self, iteration: int, epoch: int, num_epochs: int,
+                  train_value: float, train_policy: float,
+                  val_value: float, val_policy: float):
+        """记录单个 epoch 的损失"""
+        self._write_log(f"  Epoch {epoch}/{num_epochs}:")
+        self._write_log(f"    Train - Value: {train_value:.4f}, Policy: {train_policy:.4f}")
+        self._write_log(f"    Val   - Value: {val_value:.4f}, Policy: {val_policy:.4f}")
+    
+    def log_iteration_end(self, iteration: int,
+                          train_value: float, train_policy: float,
+                          val_value: float, val_policy: float):
+        """记录迭代结束时的损失（最后一个 epoch 的值）"""
+        self.history['iterations'].append(iteration)
+        self.history['train_value_loss'].append(train_value)
+        self.history['train_policy_loss'].append(train_policy)
+        self.history['val_value_loss'].append(val_value)
+        self.history['val_policy_loss'].append(val_policy)
+        
+        self._write_log(f"检查点已保存: {iteration}.pth")
+        self._save_json()
+    
+    def log_evaluation(self, iteration: int, win_rate: float, 
+                       updated_best: bool, threshold: float):
+        """记录评估结果"""
+        self.history['eval_iterations'].append(iteration)
+        self.history['eval_win_rates'].append(win_rate)
+        
+        self._write_log(f"\n--- 评估对弈 ---")
+        self._write_log(f"当前模型胜率: {win_rate*100:.1f}%")
+        
+        if updated_best:
+            self.history['best_model_updates'].append(iteration)
+            self._write_log(f"✓ 胜率超过 {threshold*100:.0f}%，更新最佳模型!")
         else:
-            cpu_network = PolicyValueNetwork()
+            self._write_log(f"✗ 胜率未超过 {threshold*100:.0f}%，保持原最佳模型")
         
-        cpu_network.load_state_dict(self.network.state_dict())
-        cpu_network.to('cpu')
-        cpu_network.eval()
-        return cpu_network
+        self._save_json()
     
-    def _get_cpu_best_network(self) -> Optional[PolicyValueNetwork]:
-        """获取CPU版本的最佳网络"""
-        if self.best_network is None:
-            return None
-        
-        if self.use_small_network:
-            cpu_network = PolicyValueNetworkSmall()
-        else:
-            cpu_network = PolicyValueNetwork()
-        
-        cpu_network.load_state_dict(self.best_network.state_dict())
-        cpu_network.to('cpu')
-        cpu_network.eval()
-        return cpu_network
+    def log_training_complete(self, best_model_path: str):
+        """记录训练完成"""
+        self._write_log(f"\n{'='*60}")
+        self._write_log(f"训练完成! 最佳模型: {best_model_path}")
+        self._write_log(f"结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        self._write_log(f"{'='*60}")
+        self._save_json()
     
-    def _load_best_model_if_exists(self, use_small_network: bool) -> None:
-        """尝试加载已有的最佳模型"""
-        best_path = os.path.join(self.model_dir, 'best_model.pth')
-        if os.path.exists(best_path):
-            try:
-                checkpoint = torch.load(best_path, map_location=self.device)
-                
-                # 根据保存的配置创建网络
-                num_blocks = checkpoint.get('num_res_blocks', 10)
-                num_channels = checkpoint.get('num_channels', 64)
-                
-                if num_blocks <= 5 or use_small_network:
-                    self.best_network = PolicyValueNetworkSmall()
-                else:
-                    self.best_network = PolicyValueNetwork(
-                        num_channels=num_channels,
-                        num_res_blocks=num_blocks
-                    )
-                
-                self.best_network.load_state_dict(checkpoint['model_state_dict'])
-                self.best_network.to(self.device)
-                self.best_network.eval()
-                print(f"✓ 加载已有最佳模型: {best_path}")
-            except Exception as e:
-                print(f"⚠ 无法加载已有模型: {e}，将从头开始训练")
-                self.best_network = None
-        else:
-            print("未找到已有最佳模型，将从头开始训练")
+    def _save_json(self):
+        """保存 JSON 格式的历史数据"""
+        with open(self.json_file, 'w', encoding='utf-8') as f:
+            json.dump(self.history, f, indent=2)
     
-    def train(
-        self,
-        iterations: int = 100,
-        episodes_per_iteration: int = 100,
-        simulations: int = 800,
-        batch_size: int = 256,
-        epochs_per_iteration: int = 5,
-        lr: float = 0.001,
-        lr_min: float = 1e-5,
-        eval_games: int = 20,
-        save_interval: int = 5,
-        num_workers: int = 1,
-        verbose: bool = True,
-        start_iteration: int = 0,
-        optimizer_state: dict = None,
-        scheduler_state: dict = None
-    ):
-        """
-        主训练循环
+    def plot_curves(self, save_path: str = None):
+        """绘制训练曲线"""
+        if not self.history['iterations']:
+            print("没有数据可绘制")
+            return
         
-        Args:
-            iterations: 总迭代次数
-            episodes_per_iteration: 每轮自我对弈局数
-            simulations: MCTS模拟次数
-            batch_size: 训练批次大小
-            epochs_per_iteration: 每轮训练epoch数
-            lr: 初始学习率
-            lr_min: 最低学习率（余弦退火终点）
-            eval_games: 评估对局数
-            save_interval: 保存间隔
-            num_workers: 并行自我对弈的进程数 (1=不并行)
-            verbose: 是否打印详细信息
-            start_iteration: 起始迭代数（用于断点续训）
-            optimizer_state: 优化器状态（用于断点续训）
-            scheduler_state: 调度器状态（用于断点续训）
-        """
-        # 优化器 + ReduceLROnPlateau 调度器
-        optimizer = optim.Adam(self.network.parameters(), lr=lr, weight_decay=1e-4)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            mode='min',
-            factor=0.5,          # 每次减半
-            patience=5           # 5轮不降再降lr
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle('训练曲线', fontsize=14)
+        
+        iterations = self.history['iterations']
+        
+        # 1. Value Loss
+        ax1 = axes[0, 0]
+        ax1.plot(iterations, self.history['train_value_loss'], 'b-', label='Train', linewidth=1.5)
+        ax1.plot(iterations, self.history['val_value_loss'], 'r-', label='Val', linewidth=1.5)
+        ax1.set_xlabel('Iteration')
+        ax1.set_ylabel('Loss')
+        ax1.set_title('Value Loss')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # 2. Policy Loss
+        ax2 = axes[0, 1]
+        ax2.plot(iterations, self.history['train_policy_loss'], 'b-', label='Train', linewidth=1.5)
+        ax2.plot(iterations, self.history['val_policy_loss'], 'r-', label='Val', linewidth=1.5)
+        ax2.set_xlabel('Iteration')
+        ax2.set_ylabel('Loss')
+        ax2.set_title('Policy Loss')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        # 3. Total Loss
+        ax3 = axes[1, 0]
+        train_total = [2*v + p for v, p in zip(self.history['train_value_loss'], 
+                                                 self.history['train_policy_loss'])]
+        val_total = [2*v + p for v, p in zip(self.history['val_value_loss'], 
+                                               self.history['val_policy_loss'])]
+        ax3.plot(iterations, train_total, 'b-', label='Train', linewidth=1.5)
+        ax3.plot(iterations, val_total, 'r-', label='Val', linewidth=1.5)
+        ax3.set_xlabel('Iteration')
+        ax3.set_ylabel('Loss')
+        ax3.set_title('Total Loss (2*Value + Policy)')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+        
+        # 4. Win Rate
+        ax4 = axes[1, 1]
+        if self.history['eval_iterations']:
+            ax4.plot(self.history['eval_iterations'], 
+                    [r * 100 for r in self.history['eval_win_rates']], 
+                    'g-o', linewidth=1.5, markersize=4)
+            ax4.axhline(y=55, color='r', linestyle='--', label='Threshold (55%)', alpha=0.7)
+            # 标记更新最佳模型的点
+            for update_iter in self.history['best_model_updates']:
+                if update_iter in self.history['eval_iterations']:
+                    idx = self.history['eval_iterations'].index(update_iter)
+                    ax4.scatter([update_iter], 
+                               [self.history['eval_win_rates'][idx] * 100],
+                               color='red', s=100, zorder=5, marker='*')
+        ax4.set_xlabel('Iteration')
+        ax4.set_ylabel('Win Rate (%)')
+        ax4.set_title('Win Rate vs Best Model')
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
+        ax4.set_ylim(0, 100)
+        
+        plt.tight_layout()
+        
+        if save_path is None:
+            save_path = self.curve_file
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"训练曲线已保存: {save_path}")
+    
+    @staticmethod
+    def load_and_plot(json_path: str, save_path: str = None):
+        """从 JSON 文件加载数据并绘图"""
+        with open(json_path, 'r', encoding='utf-8') as f:
+            history = json.load(f)
+        
+        logger = TrainLogger.__new__(TrainLogger)
+        logger.history = history
+        logger.run_dir = os.path.dirname(json_path)
+        logger.curve_file = os.path.join(logger.run_dir, 'curves.png')
+        logger.plot_curves(save_path)
+
+
+# ==================== 训练配置 ====================
+
+class TrainConfig:
+    """训练配置 (与 nn_012.py 一致)"""
+    batch_size = 256
+    num_epochs = 3
+    learning_rate = 1e-4
+    train_ratio = 0.9
+    num_samples = 100           # 每轮自对弈局数
+    num_workers = 10            # 并行进程数
+    train_simulation = 30       # 训练时 MCTS 模拟次数
+    base_path = None            # 基础模型路径
+    model_path = 'models/checkpoints'  # 检查点保存目录
+    best_model_path = 'models/best_model.pth'  # 最佳模型路径
+    log_dir = 'logs'            # 日志目录
+    eval_interval = 5           # 评估间隔（每N轮与最佳模型对弈）
+    eval_games = 20             # 评估对弈局数
+    eval_simulations = 100      # 评估时 MCTS 模拟次数
+    win_threshold = 0.55        # 更新最佳模型的胜率阈值
+
+
+# ==================== 数据集 ====================
+
+class TrainDataset(Dataset):
+    """训练数据集"""
+    
+    def __init__(self, boards, policies, values, weights):
+        self.boards = boards
+        self.policies = policies
+        self.values = values
+        self.weights = weights
+
+    def __len__(self):
+        return len(self.boards)
+
+    def __getitem__(self, idx):
+        return self.boards[idx], self.policies[idx], self.values[idx], self.weights[idx]
+
+
+# ==================== 数据生成 ====================
+
+def generate_random_board(model, device):
+    """生成随机起始局面"""
+    model = model.to(device)
+    perm = [(i, j) for i in range(BOARD_SIZE) for j in range(BOARD_SIZE)]
+    random.shuffle(perm)
+    
+    best_val = 1e9
+    best_board = [[0] * BOARD_SIZE for _ in range(BOARD_SIZE)]
+    
+    if random.randint(0, 4) == 0:
+        return best_board
+    
+    num_tries = random.randint(50, random.randint(50, 1000))
+    
+    for _ in range(num_tries):
+        num_moves = random.randint(0, 10)
+        board = [[0] * BOARD_SIZE for _ in range(BOARD_SIZE)]
+        current = -1
+        
+        for i in range(num_moves):
+            x, y = perm[i]
+            board[x][y] = current
+            current = -current
+        
+        if check_winner(board) != 0:
+            continue
+        
+        board_tensor = board_to_tensor(board).unsqueeze(0).to(device)
+        with torch.no_grad():
+            value, _ = model.predict(board_tensor)
+        
+        val = abs(float(value))
+        if val < best_val:
+            best_val = val
+            best_board = board
+    
+    return best_board
+
+
+def calc_next_move(board, probs, temperature=0):
+    """根据概率选择下一步"""
+    valid_moves = []
+    for i in range(BOARD_SIZE):
+        for j in range(BOARD_SIZE):
+            if board[i][j] == 0:
+                valid_moves.append((i, j, probs[i][j]))
+    
+    if temperature == 0:
+        valid_moves.sort(key=lambda x: x[2], reverse=True)
+        return valid_moves[0][:2]
+    else:
+        moves = [(i, j) for i, j, _ in valid_moves]
+        ps = np.array([p for _, _, p in valid_moves], dtype=np.float64)
+        if temperature != 1.0:
+            ps = ps ** (1.0 / temperature)
+        ps = ps / (ps.sum() + 1e-10)
+        idx = np.random.choice(len(moves), p=ps)
+        return moves[idx]
+
+
+def generate_single_game(_, model_state_dict, num_simulations):
+    """生成单局自对弈数据"""
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    model = PolicyValueNetwork()
+    model.load_state_dict(model_state_dict)
+    model.to(device)
+    model.eval()
+    
+    board = generate_random_board(model, device)
+    temperature = 0.1 * random.randint(0, 9)
+    
+    mcts = MCTS(model=model, c_puct=0.8, use_noise=0.01)
+    
+    root = None
+    with torch.no_grad():
+        for move_num in range(BOARD_SIZE * BOARD_SIZE):
+            (value, action_probs), new_root = mcts.search(board, num_simulations, root)
+            
+            action = calc_next_move(board, action_probs, temperature)
+            x, y = action
+            board[x][y] = 1
+            
+            # 复用搜索树
+            if (x, y) in new_root.children and new_root.children[(x, y)][0] is not None:
+                root = new_root.children[(x, y)][0]
+            else:
+                root = None
+            
+            # 检查游戏结束
+            if mcts._is_terminal(board):
+                break
+            
+            # 翻转视角
+            for i in range(BOARD_SIZE):
+                for j in range(BOARD_SIZE):
+                    board[i][j] *= -1
+    
+    return mcts.get_train_data()
+
+
+def augment_data(boards, policies, values, weights):
+    """数据增强：D4 对称变换"""
+    aug_boards, aug_policies, aug_values, aug_weights = [], [], [], []
+    
+    for board, policy, value, weight in zip(boards, policies, values, weights):
+        value_t = torch.tensor(value).float()
+        weight_t = torch.tensor(weight).float()
+        
+        for k in range(4):
+            for flip in [False, True]:
+                new_board = torch.rot90(board, k, [1, 2])
+                new_policy = torch.rot90(policy, k, [0, 1])
+                
+                if flip:
+                    new_board = torch.flip(new_board, [2])
+                    new_policy = torch.flip(new_policy, [1])
+                
+                aug_boards.append(new_board)
+                aug_policies.append(new_policy)
+                aug_values.append(value_t)
+                aug_weights.append(weight_t)
+    
+    return (
+        torch.stack(aug_boards),
+        torch.stack(aug_policies),
+        torch.stack(aug_values),
+        torch.stack(aug_weights)
+    )
+
+
+def generate_selfplay_data(model, config: TrainConfig):
+    """生成自对弈训练数据"""
+    model_state_dict = model.state_dict()
+    
+    with multiprocessing.get_context('spawn').Pool(processes=config.num_workers) as pool:
+        func = partial(
+            generate_single_game,
+            model_state_dict=model_state_dict,
+            num_simulations=config.train_simulation
         )
-        
-        # 恢复优化器和调度器状态
-        if optimizer_state is not None:
-            optimizer.load_state_dict(optimizer_state)
-            print(f"✓ 恢复优化器状态")
-        if scheduler_state is not None:
-            scheduler.load_state_dict(scheduler_state)
-            print(f"✓ 恢复学习率调度器状态")
-        
-        # 计算实际迭代范围
-        actual_start = start_iteration + 1
-        actual_end = start_iteration + iterations + 1
-        
-        if start_iteration > 0:
-            print(f"📌 从迭代 {actual_start} 继续训练，目标迭代 {actual_end - 1}")
-        
-        # 精确计算总局数（考虑 eval_interval）
-        # 评估轮：第1轮 + 每隔 save_interval 的轮
-        eval_random_games = 10
-        num_eval_iterations = 1  # 第1轮
-        for i in range(save_interval, iterations + 1, save_interval):
-            num_eval_iterations += 1
-        
-        # 总局数 = 所有轮的自我对弈 + 评估轮的评估对局
-        total_self_play = iterations * episodes_per_iteration
-        total_eval = num_eval_iterations * (eval_random_games + eval_games)
-        total_games_all = total_self_play + total_eval
-        total_iters = iterations  # 总轮数
-        
-        # 总体进度条（在进度条和时间之间显示轮数）
-        pbar = tqdm(total=total_games_all, desc="🎮 训练进度", unit="局",
-                    bar_format='{l_bar}{bar}| {postfix}')
-        
-        for iteration in range(actual_start, actual_end):
-            self.stats['iteration'] = iteration
-            # 更新：轮数 + 时间 + 当前阶段
-            pbar.set_postfix_str(f"{iteration}/{total_iters}轮 自我对弈 0/{episodes_per_iteration}局")
-            
-            # Phase 1: 自我对弈
-            start_time = time.time()
-            
-            # 混合模式：自我对弈使用CPU版本的网络
-            if self.hybrid_mode:
-                inference_network = self._get_cpu_network()
-            else:
-                inference_network = self.network
-            
-            self_play_worker = SelfPlayWorker(
-                inference_network,
-                simulations=simulations,
-                temp_threshold=10
-            )
-            
-            # 进度回调：每完成一局更新进度条
-            last_completed = [0]
-            def self_play_progress(completed, total):
-                delta = completed - last_completed[0]
-                last_completed[0] = completed
-                pbar.update(delta)
-                pbar.set_postfix_str(f"自我对弈 {completed}/{total}局")
-            
-            # 根据进程数选择并行或串行
-            if num_workers > 1:
-                new_data = self_play_worker.self_play_games_parallel(
-                    num_games=episodes_per_iteration,
-                    num_workers=num_workers,
-                    augment=True,
-                    progress_callback=self_play_progress
-                )
-            else:
-                # 单进程模式也需要更新进度
-                new_data = []
-                for game_idx in range(episodes_per_iteration):
-                    game_data = self_play_worker.self_play_games(num_games=1, augment=True, verbose=False, show_progress=False)
-                    new_data.extend(game_data)
-                    pbar.update(1)
-                    pbar.set_postfix_str(f"自我对弈 {game_idx+1}/{episodes_per_iteration}局")
-            
-            self.replay_buffer.add(new_data)
-            self.stats['total_games'] += episodes_per_iteration
-            
-            elapsed = time.time() - start_time
-            
-            # Phase 2: 网络训练
-            pbar.set_postfix_str("训练网络中...")
-            start_time = time.time()
-            
-            losses = self._train_network(
-                optimizer,
-                batch_size=batch_size,
-                epochs=epochs_per_iteration
-            )
-            
-            self.stats['losses'].extend(losses)
-            elapsed = time.time() - start_time
-            avg_loss = np.mean(losses)
-            scheduler.step(avg_loss)
-            
-            if verbose:
-                tqdm.write(f"[迭代 {iteration}] 自我对弈: {len(new_data)} 样本, {elapsed:.1f}s, loss={avg_loss:.4f}")
-            
-            # Phase 3: 模型评估（只在特定轮次执行）
-            is_eval_iteration = (iteration % save_interval == 0 or iteration == 1)
-            
-            # 评估时使用的进程数（与自我对弈共享设置）
-            eval_workers = num_workers if num_workers > 1 else 1
-            
-            if is_eval_iteration:
-                # 实际执行评估
-                # vs 随机
-                last_completed[0] = 0
-                def eval_random_progress(completed, total, wins, losses_count, draws):
-                    delta = completed - last_completed[0]
-                    last_completed[0] = completed
-                    pbar.update(delta)
-                    pbar.set_postfix_str(f"vs随机 {completed}/{total}局 胜{wins}")
-                
-                win_rate_random = self._evaluate_vs_random(
-                    num_games=eval_random_games, 
-                    num_workers=eval_workers, 
-                    pbar=None,  # 不传pbar，用回调
-                    progress_callback=eval_random_progress
-                )
-                self.stats['win_rate_vs_random'] = win_rate_random
-                
-                # 保存检查点
-                self._save_checkpoint(iteration, optimizer, scheduler)
-                
-                # vs 最佳
-                if self.best_network is None:
-                    # 首次训练，直接保存，跳过vs最佳的进度
-                    pbar.update(eval_games)
-                    self._update_best_model(iteration)
-                    tqdm.write(f"[迭代 {iteration}] ✓ 初始最佳模型已保存")
-                else:
-                    last_completed[0] = 0
-                    def eval_best_progress(completed, total, wins, losses_count, draws):
-                        delta = completed - last_completed[0]
-                        last_completed[0] = completed
-                        pbar.update(delta)
-                        pbar.set_postfix_str(f"vs最佳 {completed}/{total}局 胜{wins}")
-                    
-                    win_rate_vs_best = self._evaluate_vs_best(
-                        num_games=eval_games, 
-                        num_workers=eval_workers, 
-                        pbar=None,
-                        progress_callback=eval_best_progress
-                    )
-                    
-                    if win_rate_vs_best > 0.55:
-                        self._update_best_model(iteration)
-                        tqdm.write(f"[迭代 {iteration}] ✓ 更新最佳模型 (vs随机:{win_rate_random*100:.0f}%, vs最佳:{win_rate_vs_best*100:.0f}%)")
-                    else:
-                        tqdm.write(f"[迭代 {iteration}] 保留旧模型 (vs随机:{win_rate_random*100:.0f}%, vs最佳:{win_rate_vs_best*100:.0f}%)")
-                
-                pbar.set_postfix_str(f"✓ 胜率{win_rate_random*100:.0f}%")
-            else:
-                # 非评估轮
-                pbar.set_postfix_str("✓")
-            
-            # 保存统计信息
-            self._save_stats()
-        
-        pbar.close()
-        print(f"\n{'='*60}")
-        print("🎉 训练完成!")
-        print(f"{'='*60}")
-        print(f"总游戏数: {self.stats['total_games']}")
-        print(f"最终对随机玩家胜率: {self.stats['win_rate_vs_random']*100:.1f}%")
+        results = list(tqdm(
+            pool.imap(func, range(config.num_samples)),
+            total=config.num_samples,
+            desc="生成自对弈数据"
+        ))
     
-    def _train_network(
-        self,
-        optimizer: optim.Optimizer,
-        batch_size: int,
-        epochs: int
-    ) -> List[float]:
-        """
-        训练网络
+    # 整合数据
+    boards, policies, values, weights = [], [], [], []
+    for game_boards, game_policies, game_values, game_weights in results:
+        boards.extend(game_boards)
+        policies.extend(game_policies)
+        values.extend(game_values)
+        weights.extend(game_weights)
+    
+    boards = torch.stack(boards)
+    policies = torch.stack(policies)
+    values = torch.FloatTensor(values)
+    weights = torch.FloatTensor(weights)
+    
+    print(f"原始数据量: {len(boards)}")
+    
+    # 数据增强
+    boards, policies, values, weights = augment_data(boards, policies, values, weights)
+    
+    print(f"增强后数据量: {len(boards)}")
+    
+    return boards, policies, values, weights
+
+
+# ==================== 训练 ====================
+
+def train_model(model, train_loader, val_loader, config: TrainConfig, 
+                logger: TrainLogger = None, iteration: int = 0):
+    """
+    训练模型
+    
+    Returns:
+        (avg_train_value, avg_train_policy, avg_val_value, avg_val_policy)
+    """
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+    
+    value_criterion = nn.MSELoss(reduction='none')
+    policy_criterion = nn.KLDivLoss(reduction='none')
+    val_value_criterion = nn.MSELoss()
+    val_policy_criterion = nn.KLDivLoss(reduction='batchmean')
+    
+    optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, 'min', patience=2, factor=0.5
+    )
+    
+    final_losses = (0, 0, 0, 0)
+    
+    for epoch in range(config.num_epochs):
+        # 训练阶段
+        model.train()
+        train_value_loss, train_policy_loss = 0, 0
         
-        Returns:
-            损失列表
-        """
-        self.network.train()
-        losses = []
-        
-        for epoch in range(epochs):
-            if len(self.replay_buffer) < batch_size:
-                continue
+        for batch_boards, batch_policies, batch_values, batch_weights in tqdm(
+            train_loader, desc=f'Epoch {epoch+1}/{config.num_epochs}'
+        ):
+            batch_boards = batch_boards.to(device)
+            batch_policies = batch_policies.to(device).view(batch_policies.size(0), -1)
+            batch_values = batch_values.to(device).unsqueeze(1)
+            batch_weights = batch_weights.to(device)
             
-            # 采样
-            states, probs, values = self.replay_buffer.sample(batch_size)
-            
-            # 转换为张量
-            states_tensor = torch.FloatTensor(states).to(self.device)
-            probs_tensor = torch.FloatTensor(probs).to(self.device)
-            values_tensor = torch.FloatTensor(values).unsqueeze(1).to(self.device)
-            
-            # 前向传播
-            pred_logits, pred_values = self.network(states_tensor)
-            
-            # 计算损失
-            # 策略损失: 交叉熵
-            # policy_loss = -torch.mean(torch.sum(probs_tensor * log_probs, dim=1))
-            policy_loss = torch.nn.functional.kl_div(
-                torch.nn.functional.log_softmax(pred_logits, dim=1),
-                probs_tensor,
-                reduction='batchmean'
-            )
-            
-            # 价值损失: MSE
-            value_loss = nn.functional.mse_loss(pred_values, values_tensor)
-            
-            # 总损失
-            total_loss = 3.0 * value_loss + policy_loss  # 3:1权重
-            
-            # 反向传播
             optimizer.zero_grad()
-            total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=1.0)
+            
+            pred_values, pred_policies = model(batch_boards)
+            
+            # 计算加权损失
+            value_loss = value_criterion(pred_values, batch_values).squeeze(1)
+            policy_loss = policy_criterion(
+                F.log_softmax(pred_policies, dim=1),
+                batch_policies
+            ).sum(dim=1)
+            
+            weighted_value_loss = (value_loss * batch_weights).mean()
+            weighted_policy_loss = (policy_loss * batch_weights).mean()
+            
+            loss = 2 * weighted_value_loss + weighted_policy_loss
+            loss.backward()
             optimizer.step()
             
-            losses.append(total_loss.item())
+            train_value_loss += weighted_value_loss.item()
+            train_policy_loss += weighted_policy_loss.item()
         
-        return losses
-
+        # 验证阶段
+        model.eval()
+        val_value_loss, val_policy_loss = 0, 0
+        with torch.no_grad():
+            for boards, policies, values, weights in val_loader:
+                boards = boards.to(device)
+                policies = policies.to(device).view(policies.size(0), -1)
+                values = values.to(device).unsqueeze(1)
+                
+                pred_values, pred_policies = model(boards)
+                val_value_loss += val_value_criterion(pred_values, values).item()
+                val_policy_loss += val_policy_criterion(
+                    F.log_softmax(pred_policies, dim=1),
+                    policies
+                ).item()
+        
+        # 计算平均损失
+        avg_train_value = train_value_loss / len(train_loader)
+        avg_train_policy = train_policy_loss / len(train_loader)
+        avg_val_value = val_value_loss / len(val_loader)
+        avg_val_policy = val_policy_loss / len(val_loader)
+        
+        final_losses = (avg_train_value, avg_train_policy, avg_val_value, avg_val_policy)
+        
+        # 记录日志
+        if logger:
+            logger.log_epoch(iteration, epoch + 1, config.num_epochs,
+                           avg_train_value, avg_train_policy,
+                           avg_val_value, avg_val_policy)
+        else:
+            print(f"  Train - Value: {avg_train_value:.4f}, Policy: {avg_train_policy:.4f}")
+            print(f"  Val   - Value: {avg_val_value:.4f}, Policy: {avg_val_policy:.4f}")
+        
+        # 学习率调度
+        val_total_loss = 2 * avg_val_value + avg_val_policy
+        scheduler.step(val_total_loss)
     
-    def _evaluate_vs_random(self, num_games: int = 20, num_workers: int = 1, pbar = None, progress_callback = None) -> float:
-        """
-        与随机玩家对战评估（使用较少的模拟次数加速）
+    return final_losses
+
+
+# ==================== 评估函数 ====================
+
+def calc_next_move_eval(board, probs):
+    """评估时选择最佳落子"""
+    best_move = None
+    best_prob = -1
+    for i in range(BOARD_SIZE):
+        for j in range(BOARD_SIZE):
+            if board[i][j] == 0 and probs[i][j] > best_prob:
+                best_prob = probs[i][j]
+                best_move = (i, j)
+    return best_move
+
+
+def evaluate_vs_model(model1, model2, device, config: TrainConfig) -> float:
+    """
+    两个模型对弈评估
+    
+    Returns:
+        model1 的胜率
+    """
+    model1.eval()
+    model2.eval()
+    
+    mcts1 = MCTS(model=model1, c_puct=0.8, use_noise=0)
+    mcts2 = MCTS(model=model2, c_puct=0.8, use_noise=0)
+    
+    model1_wins = 0
+    draws = 0
+    
+    for game_idx in range(config.eval_games):
+        board = [[0] * BOARD_SIZE for _ in range(BOARD_SIZE)]
+        model1_plays_first = game_idx % 2 == 0
+        current_is_model1 = model1_plays_first
         
-        Args:
-            num_games: 评估局数
-            num_workers: 并行进程数，>1时启用多进程
-            pbar: 外部进度条对象（可选，用于更新postfix）
-            progress_callback: 进度回调函数（可选，用于细粒度进度更新）
-        
-        Returns:
-            胜率
-        """
-        # 多进程模式
-        if num_workers > 1:
-            network_state = self.network.cpu().state_dict()
-            self.network.to(self.device)  # 恢复到原设备
-            network_class = type(self.network).__name__
+        for move_num in range(BOARD_SIZE * BOARD_SIZE):
+            mcts = mcts1 if current_is_model1 else mcts2
+            (_, probs), _ = mcts.search(board, config.eval_simulations)
+            action = calc_next_move_eval(board, probs)
             
-            # 进度回调：优先使用外部传入的回调
-            def internal_callback(completed, total, wins, losses, draws):
-                if progress_callback:
-                    progress_callback(completed, total, wins, losses, draws)
-                elif pbar:
-                    pbar.set_postfix_str(f"vs随机 {completed}/{total}局 胜{wins}")
+            if action is None:
+                draws += 1
+                break
             
-            wins, losses, draws = evaluate_games_parallel(
-                network1_state_dict=network_state,
-                network2_state_dict=None,  # None表示随机玩家
-                network1_class=network_class,
-                num_games=num_games,
-                num_workers=num_workers,
-                simulations=100,
-                desc="  vs随机",
-                progress_callback=internal_callback
+            x, y = action
+            board[x][y] = 1
+            
+            result = check_winner(board)
+            if result != 0:
+                if current_is_model1:
+                    model1_wins += 1
+                break
+            
+            # 检查棋盘是否已满
+            if all(board[i][j] != 0 for i in range(BOARD_SIZE) for j in range(BOARD_SIZE)):
+                draws += 1
+                break
+            
+            # 翻转视角
+            for i in range(BOARD_SIZE):
+                for j in range(BOARD_SIZE):
+                    board[i][j] *= -1
+            current_is_model1 = not current_is_model1
+    
+    # 计算胜率（平局算 0.5 胜）
+    win_rate = (model1_wins + draws * 0.5) / config.eval_games
+    return win_rate
+
+
+# ==================== 主训练函数 ====================
+
+def train(start_iter=0, end_iter=100, config: TrainConfig = None, logger: TrainLogger = None):
+    """主训练函数"""
+    if config is None:
+        config = TrainConfig()
+    
+    # 初始化日志记录器
+    if logger is None:
+        logger = TrainLogger(config.log_dir)
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    logger._write_log(f"使用设备: {device}")
+    logger.log_config(config)
+    
+    # 创建目录
+    os.makedirs(config.model_path, exist_ok=True)
+    os.makedirs(os.path.dirname(config.best_model_path), exist_ok=True)
+    
+    # 初始化模型
+    model = PolicyValueNetwork()
+    
+    if config.base_path and os.path.exists(config.base_path):
+        model.load_state_dict(torch.load(config.base_path, map_location=device, weights_only=True))
+        logger._write_log(f"加载基础模型: {config.base_path}")
+    
+    model.to(device)
+    
+    # 加载或初始化最佳模型
+    best_model = PolicyValueNetwork()
+    if os.path.exists(config.best_model_path):
+        best_model.load_state_dict(torch.load(config.best_model_path, map_location=device, weights_only=True))
+        logger._write_log(f"加载最佳模型: {config.best_model_path}")
+    else:
+        # 首次训练，使用当前模型作为最佳模型
+        best_model.load_state_dict(model.state_dict())
+        logger._write_log("未找到最佳模型，使用初始权重")
+    best_model.to(device)
+    
+    try:
+        for iteration in range(start_iter, end_iter):
+            logger.log_iteration_start(iteration + 1)
+            
+            model.eval()
+            
+            # 生成自对弈数据
+            boards, policies, values, weights = generate_selfplay_data(model, config)
+            logger.log_data_generation(len(boards) // 8, len(boards))  # 增强前/后
+            
+            # 划分训练集和验证集
+            num_train = int(len(boards) * config.train_ratio)
+            
+            train_dataset = TrainDataset(
+                boards[:num_train], policies[:num_train],
+                values[:num_train], weights[:num_train]
             )
-            return wins / num_games
-        
-        # 单进程模式（无嵌套进度条，直接用 progress_callback）
-        if self.hybrid_mode:
-            eval_network = self._get_cpu_network()
-        else:
-            self.network.eval()
-            eval_network = self.network
-
-        wins = 0
-        draws = 0
-
-        mcts_player = MCTSPlayer(eval_network, simulations=100, temperature=0)
-        random_player = RandomPlayer()
-
-        for game_idx in range(num_games):
-            board = Board()
-            if game_idx % 2 == 0:
-                players = [mcts_player, random_player]
-                ai_color = 1
-            else:
-                players = [random_player, mcts_player]
-                ai_color = 2
-
-            current = 0
-            while not board.is_game_over():
-                if isinstance(players[current], MCTSPlayer):
-                    action = players[current].get_action(board)
-                else:
-                    action = players[current].get_action(board)
-                x, y = action // 15, action % 15
-                board.move(x, y)
-                current = 1 - current
-
-            winner = board.get_winner()
-            if winner == ai_color:
-                wins += 1
-            elif winner == 0:
-                draws += 1
-
-            if progress_callback:
-                progress_callback(game_idx + 1, num_games, wins, num_games - wins - draws, draws)
-
-        return wins / num_games
-    
-    def _evaluate_vs_best(self, num_games: int = 20, num_workers: int = 1, pbar = None, progress_callback = None) -> float:
-        """
-        与当前最佳模型对战评估（AlphaZero风格）
-        
-        Args:
-            num_games: 评估局数（固定20局）
-            num_workers: 并行进程数，>1时启用多进程
-            pbar: 外部进度条对象（可选，用于更新postfix）
-            progress_callback: 进度回调函数（可选，用于细粒度进度更新）
-        
-        Returns:
-            新模型的胜率
-        """
-        if self.best_network is None:
-            return 1.0
-        
-        # 多进程模式
-        if num_workers > 1:
-            network_state = self.network.cpu().state_dict()
-            best_network_state = self.best_network.cpu().state_dict()
-            self.network.to(self.device)  # 恢复到原设备
-            self.best_network.to(self.device)
-            network1_class = type(self.network).__name__
-            network2_class = type(self.best_network).__name__
-            
-            # 进度回调：优先使用外部传入的回调
-            def internal_callback(completed, total, wins, losses, draws):
-                if progress_callback:
-                    progress_callback(completed, total, wins, losses, draws)
-                elif pbar:
-                    pbar.set_postfix_str(f"vs最佳 {completed}/{total}局 胜{wins}")
-            
-            wins, losses, draws = evaluate_games_parallel(
-                network1_state_dict=network_state,
-                network2_state_dict=best_network_state,
-                network1_class=network1_class,
-                network2_class=network2_class,
-                num_games=num_games,
-                num_workers=num_workers,
-                simulations=100,
-                desc="  vs最佳",
-                progress_callback=internal_callback
+            val_dataset = TrainDataset(
+                boards[num_train:], policies[num_train:],
+                values[num_train:], weights[num_train:]
             )
             
-            return (wins + 0.5 * draws) / num_games
-        
-        # 单进程模式（无嵌套进度条，直接用 progress_callback）
-        if self.hybrid_mode:
-            eval_network = self._get_cpu_network()
-            best_eval_network = self._get_cpu_best_network()
-        else:
-            self.network.eval()
-            self.best_network.eval()
-            eval_network = self.network
-            best_eval_network = self.best_network
-
-        new_player = MCTSPlayer(eval_network, simulations=100, temperature=0)
-        best_player = MCTSPlayer(best_eval_network, simulations=100, temperature=0)
-
-        wins = 0
-        losses = 0
-        draws = 0
-        for game_idx in range(num_games):
-            board = Board()
-            if game_idx % 2 == 0:
-                players = [new_player, best_player]
-                p1_color = 1
-            else:
-                players = [best_player, new_player]
-                p1_color = 2
-
-            current = 0
-            while not board.is_game_over():
-                action = players[current].get_action(board)
-                x, y = action // 15, action % 15
-                board.move(x, y)
-                current = 1 - current
-
-            winner = board.get_winner()
-            if winner == p1_color:
-                wins += 1
-            elif winner == 0:
-                draws += 1
-            else:
-                losses += 1
-
-            if progress_callback:
-                progress_callback(game_idx + 1, num_games, wins, losses, draws)
-
-        win_rate = (wins + 0.5 * draws) / num_games
-        return win_rate
-    
-    def _play_evaluation_games(
-        self, 
-        player1: MCTSPlayer, 
-        player2: MCTSPlayer, 
-        num_games: int,
-        desc: str
-    ) -> Tuple[int, int, int]:
-        """
-        执行评估对局
-        
-        Returns:
-            (player1胜, player1负, 平局)
-        """
-        wins = 0
-        losses = 0
-        draws = 0
-        
-        pbar = tqdm(range(num_games), desc=desc, leave=False, unit="局")
-        for game_idx in pbar:
-            board = Board()
+            train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
+            val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
             
-            # 交替先后手
-            if game_idx % 2 == 0:
-                players = [player1, player2]  # player1先手
-                p1_color = 1
-            else:
-                players = [player2, player1]  # player1后手
-                p1_color = 2
+            # 训练模型
+            losses = train_model(model, train_loader, val_loader, config, logger, iteration + 1)
             
-            current = 0
-            while not board.is_game_over():
-                action = players[current].get_action(board)
-                x, y = action // 15, action % 15
-                board.move(x, y)
-                current = 1 - current
+            # 保存检查点
+            checkpoint_path = os.path.join(config.model_path, f"{iteration + 1}.pth")
+            torch.save(model.state_dict(), checkpoint_path)
             
-            winner = board.get_winner()
-            if winner == p1_color:
-                wins += 1
-            elif winner == 0:
-                draws += 1
-            else:
-                losses += 1
+            # 记录迭代结束
+            logger.log_iteration_end(iteration + 1, *losses)
             
-            pbar.set_postfix_str(f"{wins}胜{losses}负")
-        pbar.close()
+            # 评估：每 eval_interval 轮与最佳模型对弈
+            if (iteration + 1) % config.eval_interval == 0:
+                win_rate = evaluate_vs_model(model, best_model, device, config)
+                updated_best = win_rate > config.win_threshold
+                
+                if updated_best:
+                    torch.save(model.state_dict(), config.best_model_path)
+                    best_model.load_state_dict(model.state_dict())
+                
+                logger.log_evaluation(iteration + 1, win_rate, updated_best, config.win_threshold)
+            
+            # 每轮结束后更新曲线图
+            logger.plot_curves()
         
-        return wins, losses, draws
+        logger.log_training_complete(config.best_model_path)
+        
+    except KeyboardInterrupt:
+        logger._write_log("\n训练被用户中断")
+        logger.plot_curves()
     
-    def _save_checkpoint(self, iteration: int, optimizer: optim.Optimizer = None, scheduler = None) -> None:
-        """
-        保存检查点（包含完整训练状态）
-        
-        Args:
-            iteration: 当前迭代数
-            optimizer: 优化器（可选）
-            scheduler: 学习率调度器（可选）
-        """
-        # 保存网络参数
-        path = os.path.join(self.model_dir, f'checkpoint_{iteration}.pth')
-        
-        checkpoint = {
-            'iteration': iteration,
-            'model_state_dict': self.network.state_dict(),
-            'network_class': type(self.network).__name__,
-            'num_res_blocks': len(self.network.res_blocks),
-            'num_channels': self.network.res_blocks[0].conv1.out_channels if hasattr(self.network, 'res_blocks') and len(self.network.res_blocks) > 0 else 64,
-            'stats': {
-                'iteration': self.stats['iteration'],
-                'total_games': self.stats['total_games'],
-                'win_rate_vs_random': self.stats['win_rate_vs_random'],
-                'best_model_iteration': self.stats['best_model_iteration'],
-            }
-        }
-        
-        # 保存优化器状态
-        if optimizer is not None:
-            checkpoint['optimizer_state_dict'] = optimizer.state_dict()
-        
-        # 保存调度器状态
-        if scheduler is not None:
-            checkpoint['scheduler_state_dict'] = scheduler.state_dict()
-        
-        torch.save(checkpoint, path)
-        tqdm.write(f"保存检查点: {path}")
-        
-        # 保存经验池到data目录
-        buffer_path = os.path.join(self.data_dir, 'replay_buffer.pkl')
-        self.replay_buffer.save(buffer_path)
-    
-    def _update_best_model(self, iteration: int) -> None:
-        """更新最佳模型"""
-        path = os.path.join(self.model_dir, 'best_model.pth')
-        self.network.save(path)
-        
-        # 从文件加载创建新的best_network（比deepcopy更可靠）
-        # 根据当前网络的残差块数量判断类型
-        num_blocks = len(self.network.res_blocks)
-        if num_blocks <= 5:
-            self.best_network = PolicyValueNetworkSmall()
-        else:
-            self.best_network = PolicyValueNetwork()
-        
-        self.best_network.load_state_dict(self.network.state_dict())
-        self.best_network.to(self.device)
-        self.best_network.eval()
-        
-        self.stats['best_model_iteration'] = iteration
-        tqdm.write(f"✓ 更新最佳模型 (迭代 {iteration})")
-    
-    def _save_stats(self) -> None:
-        """保存训练统计信息"""
-        path = os.path.join(self.model_dir, 'training_stats.json')
-        
-        # 转换为可序列化格式
-        stats_to_save = {
-            'iteration': self.stats['iteration'],
-            'total_games': self.stats['total_games'],
-            'win_rate_vs_random': self.stats['win_rate_vs_random'],
-            'best_model_iteration': self.stats['best_model_iteration'],
-            'avg_recent_loss': float(np.mean(self.stats['losses'][-100:])) if self.stats['losses'] else 0.0,
-            'timestamp': datetime.now().isoformat()
-        }
-        
-        with open(path, 'w') as f:
-            json.dump(stats_to_save, f, indent=2)
-    
-    def load_checkpoint(self, path: str) -> Tuple[int, Optional[dict], Optional[dict]]:
-        """
-        加载检查点（包含完整训练状态）
-        
-        Args:
-            path: 检查点路径
-        
-        Returns:
-            (起始迭代数, 优化器状态, 调度器状态)
-        """
-        checkpoint = torch.load(path, map_location=self.device)
-        
-        # 加载网络参数
-        self.network.load_state_dict(checkpoint['model_state_dict'])
-        self.network.to(self.device)
-        print(f"✓ 加载检查点: {path}")
-        
-        # 恢复训练统计
-        if 'stats' in checkpoint:
-            saved_stats = checkpoint['stats']
-            self.stats['iteration'] = saved_stats.get('iteration', 0)
-            self.stats['total_games'] = saved_stats.get('total_games', 0)
-            self.stats['win_rate_vs_random'] = saved_stats.get('win_rate_vs_random', 0.0)
-            self.stats['best_model_iteration'] = saved_stats.get('best_model_iteration', 0)
-            print(f"  恢复训练状态: 迭代 {self.stats['iteration']}, 总对局 {self.stats['total_games']}")
-        
-        # 加载经验池
-        buffer_path = os.path.join(self.data_dir, 'replay_buffer.pkl')
-        if self.replay_buffer.load(buffer_path):
-            print(f"  经验池: {len(self.replay_buffer)} 条数据")
-        
-        # 返回用于恢复优化器的状态
-        start_iteration = checkpoint.get('iteration', 0)
-        optimizer_state = checkpoint.get('optimizer_state_dict', None)
-        scheduler_state = checkpoint.get('scheduler_state_dict', None)
-        
-        return start_iteration, optimizer_state, scheduler_state
+    return model
 
 
-def main():
-    """主函数"""
-    parser = argparse.ArgumentParser(description='五子棋AI训练')
-    parser.add_argument('--iterations', type=int, default=100, help='训练迭代次数')
-    parser.add_argument('--episodes', type=int, default=10, help='每轮自我对弈局数')
-    parser.add_argument('--simulations', type=int, default=400, help='MCTS模拟次数')
-    parser.add_argument('--batch-size', type=int, default=256, help='训练批次大小')
-    parser.add_argument('--epochs', type=int, default=5, help='每轮训练epoch数')
-    parser.add_argument('--lr', type=float, default=0.001, help='学习率')
-    parser.add_argument('--model-dir', type=str, default='models', help='模型保存目录')
-    parser.add_argument('--data-dir', type=str, default='data', help='数据保存目录')
-    parser.add_argument('--small-network', action='store_true', help='使用小型网络')
-    parser.add_argument('--device', type=str, default='auto', help='计算设备')
-    parser.add_argument('--resume', type=str, default=None, help='从指定检查点恢复')
-    parser.add_argument('--auto-resume', action='store_true', help='自动从最新检查点恢复')
-    parser.add_argument('--eval-interval', type=int, default=5, help='评估间隔(每N轮评估一次)')
-    parser.add_argument('--workers', type=int, default=1, help='并行自我对弈进程数 (1=不并行)')
-    parser.add_argument('--buffer-size', type=int, default=50000, help='经验池最大容量')
+def find_latest_checkpoint(checkpoint_dir: str) -> tuple[int, str | None]:
+    """
+    查找最新的检查点
+    
+    Returns:
+        (最新迭代号, 检查点路径) 或 (0, None) 如果没有检查点
+    """
+    if not os.path.exists(checkpoint_dir):
+        return 0, None
+    
+    latest_iter = 0
+    latest_path = None
+    
+    for filename in os.listdir(checkpoint_dir):
+        if filename.endswith('.pth'):
+            try:
+                # 文件名格式: 123.pth
+                iter_num = int(filename[:-4])
+                if iter_num > latest_iter:
+                    latest_iter = iter_num
+                    latest_path = os.path.join(checkpoint_dir, filename)
+            except ValueError:
+                continue
+    
+    return latest_iter, latest_path
+
+
+# ==================== 命令行接口 ====================
+
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="五子棋 AI 训练")
+    subparsers = parser.add_subparsers(dest='command', help='可用命令')
+    
+    # ===== 训练命令 =====
+    train_parser = subparsers.add_parser('train', help='开始训练')
+    
+    # 迭代控制
+    train_parser.add_argument("--iterations", "-n", type=int, default=100, help="训练迭代次数")
+    
+    # 训练参数
+    train_parser.add_argument("--samples", type=int, default=100, help="每轮自对弈局数")
+    train_parser.add_argument("--simulations", type=int, default=30, help="MCTS 模拟次数")
+    train_parser.add_argument("--batch-size", type=int, default=256, help="训练批次大小")
+    train_parser.add_argument("--epochs", type=int, default=3, help="每轮训练 epoch 数")
+    train_parser.add_argument("--lr", type=float, default=1e-4, help="学习率")
+    train_parser.add_argument("--train-ratio", type=float, default=0.9, help="训练集比例")
+    
+    # 评估参数
+    train_parser.add_argument("--eval-interval", type=int, default=10, help="评估间隔（每N轮与最佳模型对弈）")
+    train_parser.add_argument("--eval-games", type=int, default=20, help="评估对弈局数")
+    train_parser.add_argument("--eval-simulations", type=int, default=100, help="评估时 MCTS 模拟次数")
+    train_parser.add_argument("--win-threshold", type=float, default=0.55, help="更新最佳模型的胜率阈值")
+    
+    # 并行与路径
+    train_parser.add_argument("--workers", type=int, default=10, help="并行进程数")
+    train_parser.add_argument("--base", type=str, default=None, help="基础模型路径")
+    train_parser.add_argument("--save-dir", type=str, default="models/checkpoints", help="检查点保存目录")
+    train_parser.add_argument("--best-model", type=str, default="models/best_model.pth", help="最佳模型路径")
+    train_parser.add_argument("--log-dir", type=str, default="logs", help="日志保存目录")
+    
+    # ===== 绘图命令 =====
+    plot_parser = subparsers.add_parser('plot', help='从日志绘制训练曲线')
+    plot_parser.add_argument("json_file", type=str, help="训练日志的 JSON 文件路径")
+    plot_parser.add_argument("--output", "-o", type=str, default=None, help="输出图片路径")
     
     args = parser.parse_args()
     
-    # 自动查找最新检查点
-    resume_path = args.resume
-    if args.auto_resume and resume_path is None:
-        resume_path = find_latest_checkpoint(args.model_dir)
-        if resume_path:
-            print(f"🔍 自动发现最新检查点: {resume_path}")
+    # 处理绘图命令
+    if args.command == 'plot':
+        TrainLogger.load_and_plot(args.json_file, args.output)
     
-    # 创建训练器
-    trainer = Trainer(
-        model_dir=args.model_dir,
-        data_dir=args.data_dir,
-        use_small_network=args.small_network,
-        device=args.device,
-        buffer_size=args.buffer_size
-    )
-    
-    # 断点续训参数
-    start_iteration = 0
-    optimizer_state = None
-    scheduler_state = None
-    
-    # 恢复训练
-    if resume_path:
-        start_iteration, optimizer_state, scheduler_state = trainer.load_checkpoint(resume_path)
-    
-    # 开始训练
-    trainer.train(
-        iterations=args.iterations,
-        episodes_per_iteration=args.episodes,
-        simulations=args.simulations,
-        batch_size=args.batch_size,
-        epochs_per_iteration=args.epochs,
-        lr=args.lr,
-        save_interval=args.eval_interval,
-        num_workers=args.workers,
-        verbose=True,
-        start_iteration=start_iteration,
-        optimizer_state=optimizer_state,
-        scheduler_state=scheduler_state
-    )
-
-
-def find_latest_checkpoint(model_dir: str) -> Optional[str]:
-    """
-    查找最新的检查点文件
-    
-    Args:
-        model_dir: 模型目录
-    
-    Returns:
-        最新检查点的路径，如果没有则返回None
-    """
-    import glob
-    import re
-    
-    if not os.path.exists(model_dir):
-        return None
-    
-    # 查找所有检查点文件
-    pattern = os.path.join(model_dir, 'checkpoint_*.pth')
-    checkpoints = glob.glob(pattern)
-    
-    if not checkpoints:
-        return None
-    
-    # 提取迭代数并排序
-    def get_iteration(path):
-        match = re.search(r'checkpoint_(\d+)\.pth', path)
-        return int(match.group(1)) if match else 0
-    
-    checkpoints.sort(key=get_iteration, reverse=True)
-    return checkpoints[0]
-
-
-def check_resume_compatibility(checkpoint_path: str, use_small_network: bool) -> Tuple[bool, str]:
-    """
-    检查检查点与当前配置的兼容性
-    
-    Args:
-        checkpoint_path: 检查点路径
-        use_small_network: 是否使用小型网络
-    
-    Returns:
-        (是否兼容, 原因说明)
-    """
-    try:
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    # 处理训练命令（或无命令时默认训练）
+    elif args.command == 'train' or args.command is None:
+        # 如果没有子命令，重新解析为训练参数
+        if args.command is None:
+            train_parser = argparse.ArgumentParser(description="五子棋 AI 训练")
+            train_parser.add_argument("--iterations", "-n", type=int, default=100, help="训练迭代次数")
+            train_parser.add_argument("--samples", type=int, default=100, help="每轮自对弈局数")
+            train_parser.add_argument("--simulations", type=int, default=30, help="MCTS 模拟次数")
+            train_parser.add_argument("--batch-size", type=int, default=256, help="训练批次大小")
+            train_parser.add_argument("--epochs", type=int, default=3, help="每轮训练 epoch 数")
+            train_parser.add_argument("--lr", type=float, default=1e-4, help="学习率")
+            train_parser.add_argument("--train-ratio", type=float, default=0.9, help="训练集比例")
+            train_parser.add_argument("--eval-interval", type=int, default=10, help="评估间隔")
+            train_parser.add_argument("--eval-games", type=int, default=20, help="评估对弈局数")
+            train_parser.add_argument("--eval-simulations", type=int, default=100, help="评估时 MCTS 模拟次数")
+            train_parser.add_argument("--win-threshold", type=float, default=0.55, help="更新最佳模型的胜率阈值")
+            train_parser.add_argument("--workers", type=int, default=10, help="并行进程数")
+            train_parser.add_argument("--base", type=str, default=None, help="基础模型路径")
+            train_parser.add_argument("--save-dir", type=str, default="models/checkpoints", help="检查点保存目录")
+            train_parser.add_argument("--best-model", type=str, default="models/best_model.pth", help="最佳模型路径")
+            train_parser.add_argument("--log-dir", type=str, default="logs", help="日志保存目录")
+            args = train_parser.parse_args()
         
-        # 检查网络类型
-        saved_class = checkpoint.get('network_class', 'PolicyValueNetwork')
-        saved_blocks = checkpoint.get('num_res_blocks', 10)
+        # 创建配置
+        config = TrainConfig()
+        config.num_samples = args.samples
+        config.train_simulation = args.simulations
+        config.batch_size = args.batch_size
+        config.num_epochs = args.epochs
+        config.learning_rate = args.lr
+        config.train_ratio = args.train_ratio
+        config.eval_interval = args.eval_interval
+        config.eval_games = args.eval_games
+        config.eval_simulations = args.eval_simulations
+        config.win_threshold = args.win_threshold
+        config.num_workers = args.workers
+        config.base_path = args.base
+        config.model_path = args.save_dir
+        config.best_model_path = args.best_model
+        config.log_dir = args.log_dir
         
-        is_saved_small = saved_class == 'PolicyValueNetworkSmall' or saved_blocks <= 5
+        # 自动检测最新检查点
+        latest_iter, latest_path = find_latest_checkpoint(config.model_path)
         
-        if is_saved_small != use_small_network:
-            if is_saved_small:
-                return False, "检查点是小型网络，但当前未指定 --small-network"
-            else:
-                return False, "检查点是标准网络，但当前指定了 --small-network"
+        if latest_iter > 0:
+            print(f"检测到最新检查点: 迭代 {latest_iter} ({latest_path})")
+            # 如果没有指定base，自动使用最新检查点续训
+            if config.base_path is None:
+                config.base_path = latest_path
+                print(f"自动从检查点续训")
+        else:
+            print("未检测到检查点，从头开始训练")
         
-        return True, "兼容"
-    except Exception as e:
-        return False, f"无法读取检查点: {e}"
-
-
-if __name__ == '__main__':
-    main()
+        start_iter = latest_iter
+        end_iter = latest_iter + args.iterations
+        
+        print(f"训练范围: 迭代 {start_iter + 1} 到 {end_iter}")
+        
+        # 开始训练
+        train(start_iter=start_iter, end_iter=end_iter, config=config)

@@ -1,253 +1,156 @@
 """
-五子棋棋盘类
-实现棋盘状态管理、落子、悔棋等功能
+五子棋棋盘模块
+管理游戏状态和规则
 """
 
-import numpy as np
-from typing import Tuple, Optional, List
-from copy import deepcopy
-from .rules import check_winner, get_winner_line, is_valid_move, get_legal_moves, is_board_full
+from typing import List, Tuple, Optional
+
+BOARD_SIZE = 15
 
 
 class Board:
     """
     五子棋棋盘类
     
-    Attributes:
-        size: 棋盘大小，默认15x15
-        board: 棋盘状态数组，0=空，1=黑，2=白
-        current_player: 当前玩家，1=黑，2=白
-        history: 落子历史记录
-        last_move: 最后一步落子位置
-        winner: 获胜者，0=无，1=黑，2=白
-        game_over: 游戏是否结束
+    棋盘表示:
+        - 0: 空位
+        - 1: 黑棋
+        - 2: 白棋
     """
     
-    def __init__(self, size: int = 15):
-        """
-        初始化棋盘
-        
-        Args:
-            size: 棋盘大小，默认15
-        """
-        self.size = size
+    def __init__(self):
         self.reset()
     
-    def reset(self) -> None:
-        """重置棋盘到初始状态"""
-        self.board = np.zeros((self.size, self.size), dtype=np.int8)
-        self.current_player = 1  # 黑先
+    def reset(self):
+        """重置棋盘"""
+        self.board: List[List[int]] = [[0] * BOARD_SIZE for _ in range(BOARD_SIZE)]
+        self.current_player = 1  # 1=黑先
         self.history: List[Tuple[int, int]] = []
         self.last_move: Optional[Tuple[int, int]] = None
-        self.winner = 0
         self.game_over = False
+        self.winner = 0
     
     def copy(self) -> 'Board':
-        """创建棋盘副本"""
-        new_board = Board(self.size)
-        new_board.board = self.board.copy()
+        """创建副本"""
+        new_board = Board()
+        new_board.board = [row[:] for row in self.board]
         new_board.current_player = self.current_player
-        new_board.history = self.history.copy()
+        new_board.history = self.history[:]
         new_board.last_move = self.last_move
-        new_board.winner = self.winner
         new_board.game_over = self.game_over
+        new_board.winner = self.winner
         return new_board
     
     def move(self, x: int, y: int) -> bool:
         """
-        在指定位置落子
+        落子
         
         Args:
-            x: 落子x坐标 (0-14)
-            y: 落子y坐标 (0-14)
-        
+            x, y: 落子坐标
+            
         Returns:
-            落子是否成功
+            是否成功
         """
         if self.game_over:
             return False
-        
-        if not is_valid_move(self.board, x, y):
+        if not (0 <= x < BOARD_SIZE and 0 <= y < BOARD_SIZE):
+            return False
+        if self.board[x][y] != 0:
             return False
         
-        # 落子
-        self.board[x, y] = self.current_player
+        self.board[x][y] = self.current_player
         self.history.append((x, y))
         self.last_move = (x, y)
         
         # 检查胜负
-        self.winner = check_winner(self.board, self.last_move)
-        if self.winner != 0:
+        if self._check_win(x, y):
             self.game_over = True
-        elif is_board_full(self.board):
-            self.game_over = True  # 平局
+            self.winner = self.current_player
+        elif self._is_full():
+            self.game_over = True
+            self.winner = 0
         else:
-            # 交换玩家
             self.current_player = 3 - self.current_player
         
         return True
     
-    def move_by_action(self, action: int) -> bool:
-        """
-        通过动作编号落子
-        
-        Args:
-            action: 动作编号 (0-224)，action = x * 15 + y
-        
-        Returns:
-            落子是否成功
-        """
-        x = action // self.size
-        y = action % self.size
-        return self.move(x, y)
-    
     def undo(self) -> bool:
-        """
-        悔棋（撤销最后一步）
-        
-        Returns:
-            悔棋是否成功
-        """
+        """悔棋"""
         if not self.history:
             return False
         
-        # 撤销最后一步
         x, y = self.history.pop()
-        self.board[x, y] = 0
-        
-        # 重置游戏状态
+        self.board[x][y] = 0
         self.game_over = False
         self.winner = 0
         self.current_player = 3 - self.current_player
         
-        # 更新最后落子位置
-        if self.history:
-            self.last_move = self.history[-1]
-        else:
-            self.last_move = None
-        
+        self.last_move = self.history[-1] if self.history else None
         return True
     
-    def get_legal_actions(self) -> List[int]:
-        """
-        获取所有合法动作编号
+    def _check_win(self, x: int, y: int) -> bool:
+        """检查是否获胜"""
+        player = self.board[x][y]
+        directions = [(0, 1), (1, 0), (1, 1), (1, -1)]
         
-        Returns:
-            合法动作列表
-        """
-        actions = []
-        for i in range(self.size):
-            for j in range(self.size):
-                if self.board[i, j] == 0:
-                    actions.append(i * self.size + j)
-        return actions
+        for dx, dy in directions:
+            count = 1
+            for sign in [1, -1]:
+                for i in range(1, 5):
+                    nx, ny = x + sign * dx * i, y + sign * dy * i
+                    if 0 <= nx < BOARD_SIZE and 0 <= ny < BOARD_SIZE and self.board[nx][ny] == player:
+                        count += 1
+                    else:
+                        break
+            if count >= 5:
+                return True
+        return False
     
-    def get_legal_moves(self) -> List[Tuple[int, int]]:
-        """
-        获取所有合法落子位置
-        
-        Returns:
-            合法位置列表
-        """
-        return get_legal_moves(self.board)
-    
-    def is_game_over(self) -> bool:
-        """检查游戏是否结束"""
-        return self.game_over
-    
-    def get_winner(self) -> int:
-        """获取获胜者，0=无/平局，1=黑，2=白"""
-        return self.winner
+    def _is_full(self) -> bool:
+        """检查棋盘是否已满"""
+        return all(self.board[i][j] != 0 for i in range(BOARD_SIZE) for j in range(BOARD_SIZE))
     
     def get_winner_line(self) -> Optional[List[Tuple[int, int]]]:
         """获取获胜连线"""
-        if self.winner == 0:
+        if self.winner == 0 or not self.last_move:
             return None
-        return get_winner_line(self.board, self.last_move)
+        
+        x, y = self.last_move
+        player = self.winner
+        directions = [(0, 1), (1, 0), (1, 1), (1, -1)]
+        
+        for dx, dy in directions:
+            line = [(x, y)]
+            for sign in [1, -1]:
+                for i in range(1, 5):
+                    nx, ny = x + sign * dx * i, y + sign * dy * i
+                    if 0 <= nx < BOARD_SIZE and 0 <= ny < BOARD_SIZE and self.board[nx][ny] == player:
+                        if sign == 1:
+                            line.append((nx, ny))
+                        else:
+                            line.insert(0, (nx, ny))
+                    else:
+                        break
+            if len(line) >= 5:
+                return line[:5]
+        return None
     
-    def encode_state(self) -> np.ndarray:
+    def to_mcts_format(self, perspective: int) -> List[List[int]]:
         """
-        将棋盘状态编码为神经网络输入格式
+        转换为 MCTS 使用的棋盘格式
         
-        Returns:
-            形状为(3, 15, 15)的numpy数组
-            - 通道0: 当前玩家棋子位置
-            - 通道1: 对手棋子位置
-            - 通道2: 当前玩家标识（全1或全0）
-        """
-        state = np.zeros((3, self.size, self.size), dtype=np.float32)
-        
-        # 通道0: 当前玩家棋子
-        state[0] = (self.board == self.current_player).astype(np.float32)
-        
-        # 通道1: 对手棋子
-        opponent = 3 - self.current_player
-        state[1] = (self.board == opponent).astype(np.float32)
-        
-        # 通道2: 当前玩家标识
-        if self.current_player == 1:
-            state[2] = np.ones((self.size, self.size), dtype=np.float32)
-        else:
-            state[2] = np.zeros((self.size, self.size), dtype=np.float32)
-        
-        return state
-    
-    def get_symmetries(self, probs: np.ndarray) -> List[Tuple[np.ndarray, np.ndarray]]:
-        """
-        获取棋盘状态的对称变换（用于数据增强）
+        MCTS 格式: 1=当前方, -1=对方, 0=空
         
         Args:
-            probs: 动作概率分布 (225,)
-        
-        Returns:
-            [(state, probs), ...] 包含8种对称变换
+            perspective: 视角 (1=黑, 2=白)
         """
-        state = self.encode_state()
-        probs_2d = probs.reshape(self.size, self.size)
-        
-        symmetries = []
-        
-        for i in range(4):
-            # 旋转
-            rotated_state = np.array([np.rot90(s, i) for s in state])
-            rotated_probs = np.rot90(probs_2d, i)
-            symmetries.append((rotated_state, rotated_probs.flatten()))
-            
-            # 水平翻转后旋转
-            flipped_state = np.array([np.fliplr(np.rot90(s, i)) for s in state])
-            flipped_probs = np.fliplr(np.rot90(probs_2d, i))
-            symmetries.append((flipped_state, flipped_probs.flatten()))
-        
-        return symmetries
-    
-    def action_to_coord(self, action: int) -> Tuple[int, int]:
-        """将动作编号转换为坐标"""
-        return action // self.size, action % self.size
-    
-    def coord_to_action(self, x: int, y: int) -> int:
-        """将坐标转换为动作编号"""
-        return x * self.size + y
-    
-    def __str__(self) -> str:
-        """棋盘的字符串表示"""
-        symbols = {0: '.', 1: 'X', 2: 'O'}
-        lines = []
-        
-        # 列标
-        header = '   ' + ' '.join(f'{i:2d}' for i in range(self.size))
-        lines.append(header)
-        
-        for i in range(self.size):
-            row = f'{i:2d} '
-            for j in range(self.size):
-                symbol = symbols[self.board[i, j]]
-                if self.last_move == (i, j):
-                    row += f'[{symbol}]'
+        mcts_board = [[0] * BOARD_SIZE for _ in range(BOARD_SIZE)]
+        for i in range(BOARD_SIZE):
+            for j in range(BOARD_SIZE):
+                if self.board[i][j] == 0:
+                    mcts_board[i][j] = 0
+                elif self.board[i][j] == perspective:
+                    mcts_board[i][j] = 1
                 else:
-                    row += f' {symbol} '
-            lines.append(row)
-        
-        return '\n'.join(lines)
-    
-    def __repr__(self) -> str:
-        return f'Board(size={self.size}, current_player={self.current_player}, moves={len(self.history)})'
+                    mcts_board[i][j] = -1
+        return mcts_board
