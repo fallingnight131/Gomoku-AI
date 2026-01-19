@@ -43,11 +43,12 @@ import GameView from './views/Game.vue'
 }
 
 .header {
-  background: linear-gradient(135deg, var(--primary), var(--card-bg));
+  background: linear-gradient(135deg, var(--shadow-transparent), var(--card-bg));
   padding: 30px 0;
   text-align: center;
   width: 100%;
   min-width: 100vw;
+  box-shadow: 0 0 10px var(--shadow);
 }
 
 .header .container {
@@ -79,6 +80,7 @@ import GameView from './views/Game.vue'
   text-align: center;
   color: var(--text-secondary);
   font-size: 0.9rem;
+  box-shadow: 0 0 10px var(--shadow);
 }
 
 .footer-links {
