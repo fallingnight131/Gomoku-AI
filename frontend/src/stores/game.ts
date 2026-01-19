@@ -32,7 +32,7 @@ export const useGameStore = defineStore('game', () => {
   const visitMatrix = ref<number[][] | null>(null)
   const valueMatrix = ref<number[][] | null>(null)
   const totalSimulations = ref(0)
-  const maxSimulations = 5000
+  const maxSimulations = 3000
   let assistInterval: ReturnType<typeof setInterval> | null = null
 
   // 计算属性
@@ -205,7 +205,7 @@ export const useGameStore = defineStore('game', () => {
       
       // 达到最大模拟次数后停止
       if (totalSimulations.value >= maxSimulations) {
-        message.value = `模拟完${maxSimulations}种可能，等待落子`
+        message.value = `已模拟完${maxSimulations}种可能，别让时间白白燃烧`
         return
       }
       

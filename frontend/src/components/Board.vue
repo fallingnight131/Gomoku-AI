@@ -41,6 +41,15 @@ const wrapperStyle = computed(() => {
   }
 })
 
+// 计算遮罩层样式（需要反向缩放以匹配canvas实际显示尺寸）
+const overlayStyle = computed(() => {
+  // 遮罩层在缩放的wrapper内，需要使用原始canvas尺寸
+  return {
+    width: `${CANVAS_SIZE}px`,
+    height: `${CANVAS_SIZE}px`
+  }
+})
+
 // 绘制棋盘
 function drawBoard() {
   const canvas = canvasRef.value
@@ -287,7 +296,7 @@ onUnmounted(() => {
       />
       
       <!-- 思考中遮罩 -->
-      <div v-if="gameStore.isThinking" class="thinking-overlay">
+      <div v-if="gameStore.isThinking" class="thinking-overlay" :style="overlayStyle">
         <div class="thinking-content">
           <div class="loading"></div>
           <span>AI思考中...</span>
@@ -324,14 +333,11 @@ canvas.clickable {
   position: absolute;
   top: 0;
   left: 0;
-  width: 100%;
-  height: 100%;
   background: rgba(0, 0, 0, 0.5);
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 12px;
-  transform-origin: top center;
+  border-radius: 4px;
 }
 
 .thinking-content {

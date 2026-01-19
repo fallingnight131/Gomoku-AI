@@ -7,7 +7,7 @@ import GameView from './views/Game.vue'
     <header class="header">
       <div class="container">
         <h1>🎮 五子棋AI</h1>
-        <p class="subtitle">基于MCTS和深度学习的智能对弈系统</p>
+        <p class="subtitle">基于MCTS和残差网络的人机对弈系统</p>
       </div>
     </header>
     
@@ -18,6 +18,15 @@ import GameView from './views/Game.vue'
     <footer class="footer">
       <div class="container">
         <p>Powered by AlphaZero-style AI</p>
+        <div class="footer-links">
+          <a href="https://github.com/fallingnight131/Gomoku-AI" target="_blank" rel="noopener">
+            📦 代码仓库
+          </a>
+          <span class="divider">|</span>
+          <a href="https://github.com/fallingnight/Gomoku-AI#readme" target="_blank" rel="noopener">
+            📖 说明文档
+          </a>
+        </div>
       </div>
     </footer>
   </div>
@@ -70,6 +79,29 @@ import GameView from './views/Game.vue'
   text-align: center;
   color: var(--text-secondary);
   font-size: 0.9rem;
+}
+
+.footer-links {
+  margin-top: 10px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+}
+
+.footer-links a {
+  color: var(--text);
+  text-decoration: none;
+  transition: color 0.2s ease;
+}
+
+.footer-links a:hover {
+  color: var(--accent);
+}
+
+.footer-links .divider {
+  color: var(--text-secondary);
+  opacity: 0.5;
 }
 
 /* 平板端适配 */
