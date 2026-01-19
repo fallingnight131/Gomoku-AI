@@ -23,7 +23,7 @@ import GameView from './views/Game.vue'
             📦 代码仓库
           </a>
           <span class="divider">|</span>
-          <a href="https://github.com/fallingnight/Gomoku-AI#readme" target="_blank" rel="noopener">
+          <a href="https://fallingnight.com/2026/01/20/%E4%BB%8E%E9%9B%B6%E5%AE%9E%E7%8E%B0-AlphaZero-%E9%A3%8E%E6%A0%BC%E7%9A%84%E4%BA%94%E5%AD%90%E6%A3%8B-AI/" target="_blank" rel="noopener">
             📖 说明文档
           </a>
         </div>

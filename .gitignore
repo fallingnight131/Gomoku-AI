@@ -74,5 +74,5 @@ htmlcov/
 # Zip files
 *.zip
 
-# Other
-other/
+# Others
+docs/
