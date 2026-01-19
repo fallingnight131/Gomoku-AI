@@ -33,7 +33,8 @@ export const useGameStore = defineStore('game', () => {
   const valueMatrix = ref<number[][] | null>(null)
   const totalSimulations = ref(0)
   const maxSimulations = 3000
-  let assistInterval: ReturnType<typeof setInterval> | null = null
+  let assistInterval: ReturnType<typeof setTimeout> | null = null
+  let isAssistFetching = false // 防止并发请求
 
   // 计算属性
   const isPlayerTurn = computed(() => {
@@ -194,12 +195,12 @@ export const useGameStore = defineStore('game', () => {
     visitMatrix.value = null
     valueMatrix.value = null
     totalSimulations.value = 0
+    isAssistFetching = false
     message.value = '义眼激活中...'
     
-    // 开始定时增量搜索
-    assistInterval = setInterval(async () => {
+    // 使用 setTimeout 链式调用，确保上一次请求完成后再发下一次
+    async function fetchAssist() {
       if (!gameId.value || !aiAssistMode.value) {
-        stopAiAssist()
         return
       }
       
@@ -209,24 +210,51 @@ export const useGameStore = defineStore('game', () => {
         return
       }
       
+      // 防止并发请求
+      if (isAssistFetching) {
+        assistInterval = setTimeout(fetchAssist, 100)
+        return
+      }
+      
       try {
+        isAssistFetching = true
         const res = await gameApi.aiAssist(gameId.value, 50)
+        
+        // 再次检查是否还在辅助模式
+        if (!aiAssistMode.value) return
+        
         visitMatrix.value = res.visit_matrix
         valueMatrix.value = res.value_matrix
         totalSimulations.value = res.total_simulations
-        message.value = `义眼已激活`
+        
+        if (totalSimulations.value >= maxSimulations) {
+          message.value = `已模拟完${maxSimulations}种可能，别让时间白白燃烧`
+        } else {
+          message.value = `义眼已激活`
+        }
       } catch (error) {
         console.error('义眼搜索失败', error)
+      } finally {
+        isAssistFetching = false
       }
-    }, 200) // 每 200ms 更新一次
+      
+      // 继续下一次请求
+      if (aiAssistMode.value && totalSimulations.value < maxSimulations) {
+        assistInterval = setTimeout(fetchAssist, 200)
+      }
+    }
+    
+    // 开始第一次请求
+    fetchAssist()
   }
   
   function stopAiAssist() {
     if (assistInterval) {
-      clearInterval(assistInterval)
+      clearTimeout(assistInterval)
       assistInterval = null
     }
     aiAssistMode.value = false
+    isAssistFetching = false
     visitMatrix.value = null
     valueMatrix.value = null
     totalSimulations.value = 0
