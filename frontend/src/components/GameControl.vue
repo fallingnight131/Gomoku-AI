@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { useGameStore } from '@/stores/game'
 
 const gameStore = useGameStore()
@@ -8,6 +8,13 @@ const playerFirst = ref(true)
 function startGame() {
   gameStore.newGame(playerFirst.value)
 }
+
+// 选择先手后自动重新开始游戏
+watch(playerFirst, () => {
+  if (gameStore.gameId) {
+    startGame()
+  }
+})
 </script>
 
 <template>
@@ -68,6 +75,25 @@ function startGame() {
       >
         悔棋
       </button>
+      <button 
+        class="btn"
+        :class="gameStore.aiAssistMode ? 'btn-active' : 'btn-secondary'"
+        @click="gameStore.toggleAiAssist"
+        :disabled="gameStore.isThinking || !gameStore.isPlayerTurn || gameStore.gameOver"
+      >
+        {{ gameStore.aiAssistMode ? '关闭义眼' : '电子义眼' }}
+      </button>
+    </div>
+    
+    <!-- AI 辅助进度 -->
+    <div v-if="gameStore.aiAssistMode" class="assist-progress">
+      <div class="progress-bar">
+        <div 
+          class="progress-fill" 
+          :style="{ width: `${(gameStore.totalSimulations / gameStore.maxSimulations) * 100}%` }"
+        ></div>
+      </div>
+      <span class="progress-text">{{ gameStore.totalSimulations }} / {{ gameStore.maxSimulations }}</span>
     </div>
     
     <!-- 消息 -->
@@ -181,6 +207,38 @@ h3 {
 
 .actions .btn {
   flex: 1;
+}
+
+.btn-active {
+  background: var(--accent) !important;
+  color: white !important;
+}
+
+.assist-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.progress-bar {
+  flex: 1;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #4ade80, #22d3ee);
+  border-radius: 4px;
+  transition: width 0.2s ease;
+}
+
+.progress-text {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
 }
 
 .message {

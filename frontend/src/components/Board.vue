@@ -67,6 +67,11 @@ function drawBoard() {
     }
   }
   
+  // 绘制 AI 辅助热力图
+  if (gameStore.aiAssistMode && gameStore.visitMatrix && gameStore.valueMatrix) {
+    drawHeatmap(ctx, gameStore.visitMatrix, gameStore.valueMatrix)
+  }
+  
   // 绘制棋子
   const board = gameStore.board
   for (let i = 0; i < BOARD_SIZE; i++) {
@@ -87,6 +92,59 @@ function drawBoard() {
   // 绘制获胜连线
   if (gameStore.winnerLine) {
     drawWinnerLine(ctx, gameStore.winnerLine)
+  }
+}
+
+// 绘制热力图
+function drawHeatmap(ctx: CanvasRenderingContext2D, visitMatrix: number[][], valueMatrix: number[][]) {
+  // 找到最大访问次数
+  let maxVisit = 0
+  for (let i = 0; i < BOARD_SIZE; i++) {
+    for (let j = 0; j < BOARD_SIZE; j++) {
+      if (visitMatrix[i][j] > maxVisit) {
+        maxVisit = visitMatrix[i][j]
+      }
+    }
+  }
+  
+  if (maxVisit === 0) return
+  
+  // 计算加权平均值
+  let sumValue = 0
+  let sumWeight = 0
+  for (let i = 0; i < BOARD_SIZE; i++) {
+    for (let j = 0; j < BOARD_SIZE; j++) {
+      if (visitMatrix[i][j] > 0) {
+        const weight = visitMatrix[i][j] * visitMatrix[i][j]
+        sumValue += weight * valueMatrix[i][j]
+        sumWeight += weight
+      }
+    }
+  }
+  const meanValue = sumWeight > 0 ? sumValue / sumWeight : 0
+  
+  // 绘制每个位置的热力圆
+  for (let i = 0; i < BOARD_SIZE; i++) {
+    for (let j = 0; j < BOARD_SIZE; j++) {
+      if (visitMatrix[i][j] > 0 && gameStore.board[i][j] === 0) {
+        const px = PADDING + j * CELL_SIZE
+        const py = PADDING + i * CELL_SIZE
+        const radius = CELL_SIZE * 0.4
+        
+        // 透明度基于访问次数（使用幂函数使差异更明显）
+        const alpha = Math.pow(visitMatrix[i][j] / maxVisit, 0.75)
+        
+        // 颜色基于价值差异：绿色=好棋，红色=差棋
+        const valueDiff = Math.max(-1, Math.min(1, (meanValue - valueMatrix[i][j]) * 3))
+        const red = Math.round(Math.max(0, Math.min(255, valueDiff * 255)))
+        const green = Math.round(Math.max(0, Math.min(255, (1 - valueDiff) * 255)))
+        
+        ctx.fillStyle = `rgba(${red}, ${green}, 0, ${alpha * 0.8})`
+        ctx.beginPath()
+        ctx.arc(px, py, radius, 0, Math.PI * 2)
+        ctx.fill()
+      }
+    }
   }
 }
 
@@ -176,7 +234,7 @@ function handleClick(event: MouseEvent) {
 
 // 监听棋盘变化重绘
 watch(
-  () => [gameStore.board, gameStore.lastMove, gameStore.winnerLine],
+  () => [gameStore.board, gameStore.lastMove, gameStore.winnerLine, gameStore.visitMatrix, gameStore.aiAssistMode],
   () => {
     drawBoard()
   },

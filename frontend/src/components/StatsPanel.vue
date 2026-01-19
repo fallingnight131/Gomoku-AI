@@ -4,12 +4,13 @@ import { useGameStore } from '@/stores/game'
 
 const gameStore = useGameStore()
 
-const winRatePercent = computed(() => {
+// 后端返回的 winRate 是 AI 的胜率评估
+const aiWinRatePercent = computed(() => {
   return Math.round(gameStore.winRate * 100)
 })
 
-const aiWinRatePercent = computed(() => {
-  return 100 - winRatePercent.value
+const winRatePercent = computed(() => {
+  return 100 - aiWinRatePercent.value
 })
 
 const winRateBarStyle = computed(() => ({
@@ -64,6 +65,7 @@ const winRateBarStyle = computed(() => ({
         <li>点击棋盘落子</li>
         <li>五子连珠获胜</li>
         <li>悔棋将撤销双方各一步</li>
+        <li>可以接入电子义眼以获得友方AI视角</li>
       </ul>
     </div>
   </div>

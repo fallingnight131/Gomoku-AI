@@ -63,6 +63,17 @@ class UndoResponse(BaseModel):
     message: str = ""
 
 
+class AIAssistRequest(BaseModel):
+    simulations: int = 50  # 每次增量搜索的模拟次数
+
+
+class AIAssistResponse(BaseModel):
+    visit_matrix: List[List[int]]
+    value_matrix: List[List[float]]
+    total_simulations: int
+    avg_value: float
+
+
 class ModelInfoResponse(BaseModel):
     model_config = {"protected_namespaces": ()}
     model_loaded: bool
@@ -82,6 +93,7 @@ class GameManager:
         self.mcts: Optional[MCTS] = None
         self.model_path: str = ""
         self.simulations: int = 200
+        self.assist_roots: Dict[str, any] = {}  # 存储每个游戏的辅助搜索根节点
         self._load_model()
     
     def _load_model(self):
@@ -148,6 +160,36 @@ class GameManager:
         win_rate = (value + 1) / 2
         
         return best_move, win_rate
+    
+    def ai_assist_search(self, game_id: str, simulations: int = 50) -> Tuple[np.ndarray, np.ndarray, int, float]:
+        """AI 辅助搜索：增量 MCTS 搜索，返回热力图数据"""
+        game = self.get_game(game_id)
+        if game is None or self.mcts is None:
+            return np.zeros((BOARD_SIZE, BOARD_SIZE)), np.zeros((BOARD_SIZE, BOARD_SIZE)), 0, 0.5
+        
+        board: Board = game['board']
+        player_color = game['player_color']
+        mcts_board = board.to_mcts_format(player_color)
+        
+        # 获取或创建搜索根节点
+        existing_root = self.assist_roots.get(game_id)
+        
+        # 执行增量搜索
+        (value, _), root = self.mcts.search(mcts_board, simulations, existing_root=existing_root)
+        
+        # 保存根节点供下次继续搜索
+        self.assist_roots[game_id] = root
+        
+        # 获取统计数据
+        visit_matrix, value_matrix = self.mcts.get_statistics(root)
+        avg_value = (value + 1) / 2  # 转换为 [0, 1] 范围
+        
+        return visit_matrix, value_matrix, root.visit_count, avg_value
+    
+    def clear_assist_root(self, game_id: str):
+        """清除辅助搜索的根节点"""
+        if game_id in self.assist_roots:
+            del self.assist_roots[game_id]
 
 
 # ==================== FastAPI 应用 ====================
@@ -267,7 +309,37 @@ async def undo_move(game_id: str):
     board.undo()
     board.undo()
     
+    # 清除辅助搜索缓存
+    game_manager.clear_assist_root(game_id)
+    
     return UndoResponse(success=True, board=board.board, current_player=board.current_player, message="悔棋成功")
+
+
+@app.post("/api/game/{game_id}/assist", response_model=AIAssistResponse)
+async def ai_assist(game_id: str, request: AIAssistRequest):
+    """AI 辅助搜索：返回 MCTS 热力图数据"""
+    game = game_manager.get_game(game_id)
+    if game is None:
+        raise HTTPException(status_code=404, detail="游戏不存在")
+    
+    # 限制单次模拟次数
+    simulations = min(request.simulations, 100)
+    
+    visit_matrix, value_matrix, total_sims, avg_value = game_manager.ai_assist_search(game_id, simulations)
+    
+    return AIAssistResponse(
+        visit_matrix=visit_matrix.tolist(),
+        value_matrix=value_matrix.tolist(),
+        total_simulations=total_sims,
+        avg_value=avg_value
+    )
+
+
+@app.post("/api/game/{game_id}/assist/reset")
+async def reset_assist(game_id: str):
+    """重置 AI 辅助搜索"""
+    game_manager.clear_assist_root(game_id)
+    return {"message": "辅助搜索已重置"}
 
 
 @app.delete("/api/game/{game_id}")
@@ -289,7 +361,7 @@ async def get_model_info():
         model_path=game_manager.model_path,
         parameters=parameters,
         training_iteration=2000,
-        win_rate_vs_random=0.95
+        win_rate_vs_random=1.00
     )
 
 

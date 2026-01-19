@@ -46,6 +46,13 @@ export interface UndoResponse {
   message: string
 }
 
+export interface AIAssistResponse {
+  visit_matrix: number[][]
+  value_matrix: number[][]
+  total_simulations: number
+  avg_value: number
+}
+
 export interface ModelInfoResponse {
   model_loaded: boolean
   model_path: string
@@ -73,6 +80,15 @@ export const getGameState = async (gameId: string): Promise<GameStateResponse> =
 export const undoMove = async (gameId: string): Promise<UndoResponse> => {
   const res = await api.post(`/game/${gameId}/undo`)
   return res.data
+}
+
+export const aiAssist = async (gameId: string, simulations: number = 50): Promise<AIAssistResponse> => {
+  const res = await api.post(`/game/${gameId}/assist`, { simulations })
+  return res.data
+}
+
+export const resetAssist = async (gameId: string): Promise<void> => {
+  await api.post(`/game/${gameId}/assist/reset`)
 }
 
 export const deleteGame = async (gameId: string): Promise<void> => {
