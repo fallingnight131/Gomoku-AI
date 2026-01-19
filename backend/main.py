@@ -81,7 +81,7 @@ class GameManager:
         self.games: Dict[str, Dict] = {}
         self.mcts: Optional[MCTS] = None
         self.model_path: str = ""
-        self.simulations: int = 800
+        self.simulations: int = 200
         self._load_model()
     
     def _load_model(self):

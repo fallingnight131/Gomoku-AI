@@ -333,7 +333,7 @@ curl -X POST "http://localhost:8000/api/game/{game_id}/move" \
         ├─────────────────────────┐
         ▼                         ▼
 ┌───────────────┐         ┌───────────────┐
-│   价值头      │         │   策略头      │
+│   价值头       │         │   策略头       │
 │ Conv(32→1)    │         │ Conv(32→1)    │
 │ Flatten       │         │ Flatten       │
 │ Linear(64)    │         │ Softmax       │

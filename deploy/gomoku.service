@@ -1,0 +1,28 @@
+# Gomoku AI 后端服务
+# 文件位置: /etc/systemd/system/gomoku.service
+
+[Unit]
+Description=Gomoku AI Backend Service
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/gomoku/backend
+Environment="PATH=/var/www/gomoku/backend/venv/bin"
+# 2GB内存服务器使用单worker，减少内存占用
+ExecStart=/var/www/gomoku/backend/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1
+Restart=always
+RestartSec=5
+
+# 资源限制
+MemoryMax=2G
+CPUQuota=80%
+
+# 日志
+StandardOutput=append:/var/log/gomoku/access.log
+StandardError=append:/var/log/gomoku/error.log
+
+[Install]
+WantedBy=multi-user.target

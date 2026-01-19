@@ -71,5 +71,8 @@ frontend/dist/
 .coverage
 htmlcov/
 
+# Zip files
+*.zip
+
 # Other
 other/
