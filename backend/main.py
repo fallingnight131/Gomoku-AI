@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from typing import Optional, Dict, List, Tuple
 import uuid
 import os
+import gc
 import numpy as np
 
 from game.board import Board, BOARD_SIZE
@@ -92,8 +93,10 @@ class GameManager:
         self.games: Dict[str, Dict] = {}
         self.mcts: Optional[MCTS] = None
         self.model_path: str = ""
+        # 降低模拟次数以适配 2GB 内存服务器
         self.simulations: int = 200
         self.assist_roots: Dict[str, any] = {}  # 存储每个游戏的辅助搜索根节点
+        self.max_games: int = 10  # 限制同时存在的游戏数量
         self._load_model()
     
     def _load_model(self):
@@ -127,6 +130,12 @@ class GameManager:
     
     def create_game(self, player_first: bool = True) -> str:
         """创建新游戏"""
+        # 清理旧游戏，防止内存泄漏
+        if len(self.games) >= self.max_games:
+            oldest_game_id = next(iter(self.games))
+            self.delete_game(oldest_game_id)
+            print(f"清理旧游戏: {oldest_game_id}")
+        
         game_id = str(uuid.uuid4())[:8]
         board = Board()
         player_color = 1 if player_first else 2
@@ -144,6 +153,11 @@ class GameManager:
     def delete_game(self, game_id: str) -> bool:
         if game_id in self.games:
             del self.games[game_id]
+            # 同时清理辅助搜索的根节点
+            if game_id in self.assist_roots:
+                del self.assist_roots[game_id]
+            # 手动触发垃圾回收
+            gc.collect()
             return True
         return False
     
@@ -158,6 +172,10 @@ class GameManager:
         (value, _), root = self.mcts.search(mcts_board, self.simulations)
         best_move = self.mcts.get_best_move(root)
         win_rate = (value + 1) / 2
+        
+        # 搜索完成后释放搜索树内存
+        del root
+        gc.collect()
         
         return best_move, win_rate
     
@@ -263,9 +281,15 @@ async def player_move(game_id: str, request: MoveRequest):
             message="你赢了！" if board.winner == game['player_color'] else "平局"
         )
     
-    # AI 落子
-    (ai_x, ai_y), win_rate = game_manager.get_ai_move(board, game['ai_color'])
-    board.move(ai_x, ai_y)
+    # AI 落子（添加异常处理）
+    try:
+        (ai_x, ai_y), win_rate = game_manager.get_ai_move(board, game['ai_color'])
+        board.move(ai_x, ai_y)
+    except Exception as e:
+        import traceback
+        print(f"AI计算出错: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"AI计算失败: {str(e)}")
     
     # AI 获胜
     if board.game_over:
