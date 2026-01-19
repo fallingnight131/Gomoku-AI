@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, watch, computed } from 'vue'
+import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
 import { useGameStore } from '@/stores/game'
 
 const gameStore = useGameStore()
@@ -11,12 +11,35 @@ const PADDING = 20
 const CANVAS_SIZE = CELL_SIZE * (BOARD_SIZE - 1) + PADDING * 2
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
+const scale = ref(1)
+
+// 计算缩放比例
+function updateScale() {
+  const maxWidth = window.innerWidth - 40 // 留出边距
+  if (maxWidth < CANVAS_SIZE) {
+    scale.value = maxWidth / CANVAS_SIZE
+  } else {
+    scale.value = 1
+  }
+}
 
 // 计算棋盘样式
 const boardStyle = computed(() => ({
   width: `${CANVAS_SIZE}px`,
   height: `${CANVAS_SIZE}px`
 }))
+
+// 计算包裹层样式（用于缩放）
+const wrapperStyle = computed(() => {
+  const scaledWidth = CANVAS_SIZE * scale.value
+  const scaledHeight = CANVAS_SIZE * scale.value
+  return {
+    transform: `scale(${scale.value})`,
+    transformOrigin: 'top left',
+    width: `${scaledWidth}px`,
+    height: `${scaledHeight}px`
+  }
+})
 
 // 绘制棋盘
 function drawBoard() {
@@ -220,8 +243,9 @@ function handleClick(event: MouseEvent) {
   if (!canvas) return
   
   const rect = canvas.getBoundingClientRect()
-  const clickX = event.clientX - rect.left
-  const clickY = event.clientY - rect.top
+  // 考虑缩放比例计算实际点击位置
+  const clickX = (event.clientX - rect.left) / scale.value
+  const clickY = (event.clientY - rect.top) / scale.value
   
   // 计算棋盘坐标
   const j = Math.round((clickX - PADDING) / CELL_SIZE)
@@ -242,24 +266,32 @@ watch(
 )
 
 onMounted(() => {
+  updateScale()
+  window.addEventListener('resize', updateScale)
   drawBoard()
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', updateScale)
 })
 </script>
 
 <template>
   <div class="board-container card">
-    <canvas
-      ref="canvasRef"
-      :style="boardStyle"
-      @click="handleClick"
-      :class="{ 'clickable': gameStore.isPlayerTurn }"
-    />
-    
-    <!-- 思考中遮罩 -->
-    <div v-if="gameStore.isThinking" class="thinking-overlay">
-      <div class="thinking-content">
-        <div class="loading"></div>
-        <span>AI思考中...</span>
+    <div class="board-wrapper" :style="wrapperStyle">
+      <canvas
+        ref="canvasRef"
+        :style="boardStyle"
+        @click="handleClick"
+        :class="{ 'clickable': gameStore.isPlayerTurn }"
+      />
+      
+      <!-- 思考中遮罩 -->
+      <div v-if="gameStore.isThinking" class="thinking-overlay">
+        <div class="thinking-content">
+          <div class="loading"></div>
+          <span>AI思考中...</span>
+        </div>
       </div>
     </div>
   </div>
@@ -268,8 +300,14 @@ onMounted(() => {
 <style scoped>
 .board-container {
   position: relative;
-  display: inline-block;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
   padding: 15px;
+}
+
+.board-wrapper {
+  position: relative;
 }
 
 canvas {
@@ -286,13 +324,14 @@ canvas.clickable {
   position: absolute;
   top: 0;
   left: 0;
-  right: 0;
-  bottom: 0;
+  width: 100%;
+  height: 100%;
   background: rgba(0, 0, 0, 0.5);
   display: flex;
   align-items: center;
   justify-content: center;
   border-radius: 12px;
+  transform-origin: top center;
 }
 
 .thinking-content {
@@ -302,5 +341,23 @@ canvas.clickable {
   gap: 10px;
   color: white;
   font-size: 1.1rem;
+}
+
+/* 平板端适配 */
+@media (max-width: 900px) {
+  .board-container {
+    padding: 10px;
+  }
+}
+
+/* 手机端适配 */
+@media (max-width: 540px) {
+  .board-container {
+    padding: 5px;
+  }
+  
+  .thinking-content {
+    font-size: 1rem;
+  }
 }
 </style>

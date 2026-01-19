@@ -87,6 +87,9 @@ function formatNumber(num: number): string {
   display: flex;
   flex-direction: column;
   gap: 20px;
+  width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 h3 {
@@ -182,5 +185,48 @@ h4 {
   position: absolute;
   left: 0;
   color: var(--accent);
+}
+
+/* 手机端适配 */
+@media (max-width: 480px) {
+  .stats-panel {
+    padding: 15px;
+    gap: 15px;
+  }
+  
+  h3 {
+    text-align: center;
+  }
+  
+  .win-rate-labels {
+    font-size: 0.85rem;
+  }
+  
+  .model-info, .tips {
+    padding: 12px;
+  }
+  
+  h4 {
+    font-size: 0.85rem;
+    text-align: center;
+  }
+  
+  .info-grid {
+    gap: 10px;
+  }
+  
+  .info-item .label {
+    font-size: 0.75rem;
+  }
+  
+  .info-item .value {
+    font-size: 0.9rem;
+  }
+  
+  .tips li {
+    font-size: 0.85rem;
+    padding: 4px 0;
+    padding-left: 15px;
+  }
 }
 </style>

@@ -118,6 +118,9 @@ watch(playerFirst, () => {
   display: flex;
   flex-direction: column;
   gap: 20px;
+  width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 h3 {
@@ -271,5 +274,59 @@ h3 {
 
 .result.win {
   color: #4ade80;
+}
+
+/* 手机端适配 */
+@media (max-width: 480px) {
+  .game-control {
+    padding: 15px;
+    gap: 15px;
+  }
+  
+  h3 {
+    font-size: 1rem;
+    text-align: center;
+  }
+  
+  .option-row {
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  
+  .option-row label {
+    font-size: 0.9rem;
+  }
+  
+  .game-info {
+    padding: 12px;
+  }
+  
+  .info-row {
+    padding: 6px 0;
+    font-size: 0.9rem;
+  }
+  
+  .actions {
+    flex-wrap: wrap;
+  }
+  
+  .actions .btn {
+    font-size: 0.85rem;
+    padding: 8px 12px;
+  }
+  
+  .message {
+    padding: 10px;
+    font-size: 0.9rem;
+  }
+  
+  .game-over {
+    padding: 15px;
+  }
+  
+  .result {
+    font-size: 1.25rem;
+  }
 }
 </style>
