@@ -11,6 +11,7 @@ import uuid
 import os
 import gc
 import numpy as np
+import time
 
 from game.board import Board, BOARD_SIZE
 from ai.mcts import MCTS
@@ -96,7 +97,8 @@ class GameManager:
         # 降低模拟次数以适配 2GB 内存服务器
         self.simulations: int = 200
         self.assist_roots: Dict[str, any] = {}  # 存储每个游戏的辅助搜索根节点
-        self.max_games: int = 10  # 限制同时存在的游戏数量
+        self.max_games: int = 5  # 限制同时存在的游戏数量（2GB内存建议5个）
+        self.game_timeout: int = 1800  # 游戏超时时间（秒），30分钟不活动则清理
         self._load_model()
     
     def _load_model(self):
@@ -130,7 +132,9 @@ class GameManager:
     
     def create_game(self, player_first: bool = True) -> str:
         """创建新游戏"""
-        # 清理旧游戏，防止内存泄漏
+        # 清理过期和超量的游戏
+        self._cleanup_expired_games()
+        
         if len(self.games) >= self.max_games:
             oldest_game_id = next(iter(self.games))
             self.delete_game(oldest_game_id)
@@ -143,12 +147,32 @@ class GameManager:
         self.games[game_id] = {
             'board': board,
             'player_color': player_color,
-            'ai_color': 3 - player_color
+            'ai_color': 3 - player_color,
+            'last_activity': time.time()  # 记录最后活动时间
         }
         return game_id
     
+    def _cleanup_expired_games(self):
+        """清理超时的游戏"""
+        current_time = time.time()
+        expired_games = [
+            game_id for game_id, game in self.games.items()
+            if current_time - game.get('last_activity', 0) > self.game_timeout
+        ]
+        for game_id in expired_games:
+            print(f"清理超时游戏: {game_id}")
+            self.delete_game(game_id)
+    
+    def _update_activity(self, game_id: str):
+        """更新游戏活动时间"""
+        if game_id in self.games:
+            self.games[game_id]['last_activity'] = time.time()
+    
     def get_game(self, game_id: str) -> Optional[Dict]:
-        return self.games.get(game_id)
+        game = self.games.get(game_id)
+        if game:
+            self._update_activity(game_id)
+        return game
     
     def delete_game(self, game_id: str) -> bool:
         if game_id in self.games:
@@ -283,6 +307,10 @@ async def player_move(game_id: str, request: MoveRequest):
     
     # AI 落子（添加异常处理）
     try:
+        # 落子后清理辅助搜索缓存（棋盘已变化，旧的搜索树无效）
+        if game_id in game_manager.assist_roots:
+            del game_manager.assist_roots[game_id]
+        
         (ai_x, ai_y), win_rate = game_manager.get_ai_move(board, game['ai_color'])
         board.move(ai_x, ai_y)
     except Exception as e:
