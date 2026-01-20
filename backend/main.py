@@ -27,6 +27,7 @@ from ai.network import PolicyValueNetwork
 
 class NewGameRequest(BaseModel):
     player_first: bool = True
+    previous_game_id: Optional[str] = None  # 上一局游戏ID，用于释放
 
 
 class NewGameResponse(BaseModel):
@@ -100,10 +101,10 @@ class GameManager:
         self.mcts: Optional[MCTS] = None
         self.model_path: str = ""
         # 大幅降低模拟次数以适配 2GB 内存服务器（防止 OOM）
-        self.simulations: int = 50  # 从 200 降到 50
+        self.simulations: int = 200
         self.assist_roots: Dict[str, any] = {}  # 存储每个游戏的辅助搜索根节点
-        self.max_games: int = 3  # 限制同时存在的游戏数量（2GB内存建议3个）
-        self.game_timeout: int = 600  # 游戏超时时间（秒），10分钟不活动则清理
+        self.max_games: int = 5  # 限制同时存在的游戏数量
+        self.game_timeout: int = 180  # 游戏超时时间（秒），3分钟不活动则清理
         self._load_model()
     
     def _load_model(self):
@@ -135,15 +136,19 @@ class GameManager:
             self.mcts = None
             self.model_path = "无模型"
     
-    def create_game(self, player_first: bool = True) -> str:
-        """创建新游戏"""
-        # 清理过期和超量的游戏
+    def create_game(self, player_first: bool = True, previous_game_id: Optional[str] = None) -> Tuple[str, str]:
+        """创建新游戏，返回 (game_id, error_message)"""
+        # 优先释放玩家上一局游戏
+        if previous_game_id and previous_game_id in self.games:
+            self.delete_game(previous_game_id)
+            print(f"释放玩家上一局游戏: {previous_game_id}")
+        
+        # 清理过期游戏
         self._cleanup_expired_games()
         
+        # 如果仍然超量，拒绝创建新游戏
         if len(self.games) >= self.max_games:
-            oldest_game_id = next(iter(self.games))
-            self.delete_game(oldest_game_id)
-            print(f"清理旧游戏: {oldest_game_id}")
+            return None, f"服务器繁忙，当前有 {len(self.games)} 位玩家在游戏中，请稍后再试"
         
         game_id = str(uuid.uuid4())[:8]
         board = Board()
@@ -155,7 +160,7 @@ class GameManager:
             'ai_color': 3 - player_color,
             'last_activity': time.time()  # 记录最后活动时间
         }
-        return game_id
+        return game_id, None
     
     def _cleanup_expired_games(self):
         """清理超时的游戏"""
@@ -173,11 +178,18 @@ class GameManager:
         if game_id in self.games:
             self.games[game_id]['last_activity'] = time.time()
     
-    def get_game(self, game_id: str) -> Optional[Dict]:
+    def get_game(self, game_id: str, update_activity: bool = True) -> Optional[Dict]:
         game = self.games.get(game_id)
-        if game:
+        if game and update_activity:
             self._update_activity(game_id)
         return game
+    
+    def is_game_expired(self, game_id: str) -> bool:
+        """检查游戏是否超时"""
+        game = self.games.get(game_id)
+        if not game:
+            return True
+        return time.time() - game.get('last_activity', 0) > self.game_timeout
     
     def delete_game(self, game_id: str) -> bool:
         if game_id in self.games:
@@ -273,7 +285,12 @@ async def root():
 @app.post("/api/game/new", response_model=NewGameResponse)
 async def new_game(request: NewGameRequest):
     """创建新游戏"""
-    game_id = game_manager.create_game(player_first=request.player_first)
+    game_id, error = game_manager.create_game(
+        player_first=request.player_first,
+        previous_game_id=request.previous_game_id
+    )
+    if error:
+        raise HTTPException(status_code=503, detail=error)
     game = game_manager.get_game(game_id)
     board: Board = game['board']
     
@@ -299,6 +316,11 @@ async def new_game(request: NewGameRequest):
 @app.post("/api/game/{game_id}/move", response_model=MoveResponse)
 async def player_move(game_id: str, request: MoveRequest):
     """玩家落子"""
+    # 先检查是否超时（不更新活动时间）
+    if game_manager.is_game_expired(game_id):
+        game_manager.delete_game(game_id)
+        raise HTTPException(status_code=408, detail="游戏已超时，请重新开始")
+    
     game = game_manager.get_game(game_id)
     if game is None:
         raise HTTPException(status_code=404, detail="游戏不存在")

@@ -63,7 +63,9 @@ export const useGameStore = defineStore('game', () => {
       isThinking.value = true
       message.value = ''
       
-      const res = await gameApi.createGame(playerFirst)
+      // 传入旧的 game_id，让后端释放上一局游戏
+      const previousGameId = gameId.value ?? undefined
+      const res = await gameApi.createGame(playerFirst, previousGameId)
       
       gameId.value = res.game_id
       board.value = res.board
@@ -83,8 +85,12 @@ export const useGameStore = defineStore('game', () => {
       }
       
       message.value = playerFirst ? '请落子' : 'AI已落子，请继续'
-    } catch (error) {
-      message.value = '创建游戏失败'
+    } catch (error: any) {
+      if (error.response?.status === 503) {
+        message.value = error.response.data.detail || '服务器繁忙，请稍后再试'
+      } else {
+        message.value = '创建游戏失败'
+      }
       console.error(error)
     } finally {
       isThinking.value = false
@@ -136,12 +142,20 @@ export const useGameStore = defineStore('game', () => {
         message.value = '请落子'
         currentPlayer.value = playerColor.value
       }
-    } catch (error) {
+    } catch (error: any) {
       // 请求失败，撤销本地更新
       board.value[x][y] = 0
       lastMove.value = history.value.length > 1 ? history.value[history.value.length - 2] : null
       history.value.pop()
-      message.value = '落子失败'
+      
+      // 检查是否超时
+      if (error.response?.status === 408) {
+        message.value = '游戏已超时，请重新开始'
+        gameOver.value = true
+        gameId.value = null
+      } else {
+        message.value = '落子失败'
+      }
       console.error(error)
     } finally {
       isThinking.value = false
@@ -277,6 +291,32 @@ export const useGameStore = defineStore('game', () => {
     }
   }
 
+  async function exitGame() {
+    // 停止 AI 辅助模式
+    stopAiAssist()
+    
+    // 调用后端删除游戏，释放内存
+    if (gameId.value) {
+      try {
+        await gameApi.deleteGame(gameId.value)
+      } catch (error) {
+        console.error('退出游戏失败', error)
+      }
+    }
+    
+    // 重置本地状态
+    gameId.value = null
+    board.value = createEmptyBoard()
+    currentPlayer.value = 1
+    gameOver.value = false
+    winner.value = 0
+    winnerLine.value = null
+    lastMove.value = null
+    history.value = []
+    winRate.value = 0.5
+    message.value = '已退出游戏'
+  }
+
   return {
     // 状态
     gameId,
@@ -312,6 +352,7 @@ export const useGameStore = defineStore('game', () => {
     undo,
     loadModelInfo,
     toggleAiAssist,
-    stopAiAssist
+    stopAiAssist,
+    exitGame
   }
 })

@@ -34,13 +34,23 @@ watch(playerFirst, () => {
         </label>
       </div>
       
-      <button 
-        class="btn btn-primary full-width"
-        @click="startGame"
-        :disabled="gameStore.isThinking"
-      >
-        {{ gameStore.gameId ? '重新开始' : '开始游戏' }}
-      </button>
+      <div class="button-row">
+        <button 
+          class="btn btn-primary"
+          @click="startGame"
+          :disabled="gameStore.isThinking"
+        >
+          {{ gameStore.gameId ? '重新开始' : '开始游戏' }}
+        </button>
+        <button 
+          v-if="gameStore.gameId"
+          class="btn btn-danger"
+          @click="gameStore.exitGame"
+          :disabled="gameStore.isThinking"
+        >
+          退出游戏
+        </button>
+      </div>
     </div>
     
     <!-- 游戏信息 -->
@@ -97,7 +107,10 @@ watch(playerFirst, () => {
     </div>
     
     <!-- 消息 -->
-    <div v-if="gameStore.message" class="message" :class="{ 'winner': gameStore.gameOver }">
+    <div v-if="gameStore.message" class="message" :class="{ 
+      'winner': gameStore.gameOver && gameStore.winner !== 0,
+      'error': gameStore.message.includes('超时') || gameStore.message.includes('繁忙') || gameStore.message.includes('失败')
+    }">
       {{ gameStore.message }}
     </div>
     
@@ -150,6 +163,24 @@ h3 {
 
 .option-row input[type="radio"] {
   accent-color: var(--accent);
+}
+
+.button-row {
+  display: flex;
+  gap: 10px;
+}
+
+.button-row .btn {
+  flex: 1;
+}
+
+.btn-danger {
+  background: #e94560;
+  color: white;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #d63850;
 }
 
 .full-width {
@@ -256,6 +287,12 @@ h3 {
   background: rgba(233, 69, 96, 0.2);
   color: var(--accent);
   font-weight: 600;
+}
+
+.message.error {
+  background: rgba(255, 100, 100, 0.2);
+  color: #ff6b6b;
+  font-weight: 500;
 }
 
 .game-over {

@@ -62,8 +62,11 @@ export interface ModelInfoResponse {
 }
 
 // API函数
-export const createGame = async (playerFirst: boolean = true): Promise<NewGameResponse> => {
-  const res = await api.post('/game/new', { player_first: playerFirst })
+export const createGame = async (playerFirst: boolean = true, previousGameId?: string): Promise<NewGameResponse> => {
+  const res = await api.post('/game/new', { 
+    player_first: playerFirst,
+    previous_game_id: previousGameId 
+  })
   return res.data
 }
 
