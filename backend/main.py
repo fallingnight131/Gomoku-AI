@@ -222,6 +222,14 @@ class GameManager:
         # 获取或创建搜索根节点
         existing_root = self.assist_roots.get(game_id)
         
+        # 限制最大搜索次数，防止内存无限增长（与前端 maxSimulations 保持一致）
+        max_total_simulations = 3000
+        if existing_root and existing_root.visit_count >= max_total_simulations:
+            # 已达上限，只返回当前结果，不再搜索
+            visit_matrix, value_matrix = self.mcts.get_statistics(existing_root)
+            avg_value = (existing_root.value + 1) / 2 if existing_root.value else 0.5
+            return visit_matrix, value_matrix, existing_root.visit_count, avg_value
+        
         # 执行增量搜索
         (value, _), root = self.mcts.search(mcts_board, simulations, existing_root=existing_root)
         
