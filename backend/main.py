@@ -3,6 +3,11 @@
 基于 MCTS + CNN 的 FastAPI 服务
 """
 
+import os
+# 限制 PyTorch 线程数，减少内存占用
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -94,11 +99,11 @@ class GameManager:
         self.games: Dict[str, Dict] = {}
         self.mcts: Optional[MCTS] = None
         self.model_path: str = ""
-        # 降低模拟次数以适配 2GB 内存服务器
-        self.simulations: int = 200
+        # 大幅降低模拟次数以适配 2GB 内存服务器（防止 OOM）
+        self.simulations: int = 50  # 从 200 降到 50
         self.assist_roots: Dict[str, any] = {}  # 存储每个游戏的辅助搜索根节点
-        self.max_games: int = 5  # 限制同时存在的游戏数量（2GB内存建议5个）
-        self.game_timeout: int = 1800  # 游戏超时时间（秒），30分钟不活动则清理
+        self.max_games: int = 3  # 限制同时存在的游戏数量（2GB内存建议3个）
+        self.game_timeout: int = 600  # 游戏超时时间（秒），10分钟不活动则清理
         self._load_model()
     
     def _load_model(self):
@@ -197,8 +202,9 @@ class GameManager:
         best_move = self.mcts.get_best_move(root)
         win_rate = (value + 1) / 2
         
-        # 搜索完成后释放搜索树内存
+        # 搜索完成后清理 MCTS 缓存，释放搜索树内存
         del root
+        self.mcts.clear_cache()
         gc.collect()
         
         return best_move, win_rate

@@ -105,8 +105,12 @@ class MCTS:
         self.model = self.model.to(self.device)
         self.model.eval()
         
-        # 用于收集训练数据的节点列表
+        # 用于收集训练数据的节点列表（每次搜索前清空）
         self.visited_nodes: List[Node] = []
+    
+    def clear_cache(self):
+        """清理缓存，释放内存"""
+        self.visited_nodes.clear()
     
     def _is_board_full(self, board: list) -> bool:
         """检查棋盘是否已满"""
@@ -129,7 +133,9 @@ class MCTS:
         Returns:
             ((value, probs), root): 搜索结果和根节点
         """
+        # 如果没有复用根节点，清空之前的缓存
         if existing_root is None:
+            self.visited_nodes.clear()
             root = Node(root_board)
             self.visited_nodes.append(root)
         else:
