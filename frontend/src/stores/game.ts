@@ -174,6 +174,7 @@ export const useGameStore = defineStore('game', () => {
         gameOver.value = false
         winner.value = 0
         winnerLine.value = null
+        winRate.value = res.win_rate
         
         // 移除最后两步
         history.value.pop()

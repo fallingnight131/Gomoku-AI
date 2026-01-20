@@ -43,6 +43,7 @@ export interface UndoResponse {
   success: boolean
   board: number[][]
   current_player: number
+  win_rate: number
   message: string
 }
 

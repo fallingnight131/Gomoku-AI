@@ -68,6 +68,7 @@ class UndoResponse(BaseModel):
     success: bool
     board: List[List[int]]
     current_player: int
+    win_rate: float = 0.5
     message: str = ""
 
 
@@ -400,7 +401,19 @@ async def undo_move(game_id: str):
     # 清除辅助搜索缓存
     game_manager.clear_assist_root(game_id)
     
-    return UndoResponse(success=True, board=board.board, current_player=board.current_player, message="悔棋成功")
+    # 重新评估当前局面（从 AI 视角）
+    win_rate = 0.5
+    if game_manager.mcts is not None and len(board.history) > 0:
+        try:
+            mcts_board = board.to_mcts_format(game['ai_color'])
+            (value, _), root = game_manager.mcts.search(mcts_board, 50)  # 快速评估
+            win_rate = (value + 1) / 2
+            del root
+            game_manager.mcts.clear_cache()
+        except:
+            pass
+    
+    return UndoResponse(success=True, board=board.board, current_player=board.current_player, win_rate=win_rate, message="悔棋成功")
 
 
 @app.post("/api/game/{game_id}/assist", response_model=AIAssistResponse)
