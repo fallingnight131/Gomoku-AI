@@ -24,6 +24,7 @@ export const useGameStore = defineStore('game', () => {
   const history = ref<[number, number][]>([])
   const isThinking = ref(false)
   const winRate = ref(0.5)
+  const winRateHistory = ref<number[]>([])  // 记录每回合后的胜率历史
   const message = ref('')
   const modelInfo = ref<gameApi.ModelInfoResponse | null>(null)
   
@@ -76,6 +77,7 @@ export const useGameStore = defineStore('game', () => {
       winnerLine.value = null
       history.value = []
       winRate.value = 0.5
+      winRateHistory.value = []  // 清空胜率历史
       
       if (res.ai_move) {
         lastMove.value = res.ai_move
@@ -127,6 +129,8 @@ export const useGameStore = defineStore('game', () => {
       // 从服务器同步棋盘状态
       board.value = res.board
       winRate.value = res.win_rate
+      // 记录本回合胜率（一回合 = 玩家落子 + AI落子）
+      winRateHistory.value.push(res.win_rate)
       
       if (res.ai_move) {
         lastMove.value = res.ai_move
@@ -174,11 +178,18 @@ export const useGameStore = defineStore('game', () => {
         gameOver.value = false
         winner.value = 0
         winnerLine.value = null
-        winRate.value = res.win_rate
         
         // 移除最后两步
         history.value.pop()
         history.value.pop()
+        
+        // 从历史恢复胜率
+        winRateHistory.value.pop()
+        if (winRateHistory.value.length > 0) {
+          winRate.value = winRateHistory.value[winRateHistory.value.length - 1]
+        } else {
+          winRate.value = 0.5
+        }
         
         if (history.value.length > 0) {
           lastMove.value = history.value[history.value.length - 1]
