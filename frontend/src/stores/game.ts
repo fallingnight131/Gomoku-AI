@@ -213,10 +213,10 @@ export const useGameStore = defineStore('game', () => {
   // AI 辅助模式方法
   async function startAiAssist() {
     if (!gameId.value || !isPlayerTurn.value || gameOver.value) return
-    
+        
     // 重置辅助搜索
     await gameApi.resetAssist(gameId.value)
-    
+
     aiAssistMode.value = true
     visitMatrix.value = null
     valueMatrix.value = null
@@ -284,6 +284,7 @@ export const useGameStore = defineStore('game', () => {
     visitMatrix.value = null
     valueMatrix.value = null
     totalSimulations.value = 0
+    if (gameId.value) gameApi.resetAssist(gameId.value)
   }
   
   function toggleAiAssist() {
