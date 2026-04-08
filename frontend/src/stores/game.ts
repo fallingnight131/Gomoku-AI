@@ -103,55 +103,61 @@ export const useGameStore = defineStore('game', () => {
     if (!gameId.value || !isPlayerTurn.value) return
     if (board.value[x][y] !== 0) return
 
-    // 停止 AI 辅助模式
-    stopAiAssist()
+    // 记录义眼状态，落子后（含AI响应）需要从新位置重启
+    const wasAssisting = aiAssistMode.value
+    if (wasAssisting) stopAiAssist()
 
     // 先在本地显示玩家落子
     board.value[x][y] = playerColor.value
     lastMove.value = [x, y]
     history.value.push([x, y])
-    
+
+    let shouldRestart = false
+
     try {
       isThinking.value = true
       message.value = 'AI思考中...'
-      
+
       const res = await gameApi.makeMove(gameId.value, x, y)
-      
+
       if (!res.success) {
         // 落子失败，撤销本地更新
         board.value[x][y] = 0
         lastMove.value = history.value.length > 1 ? history.value[history.value.length - 2] : null
         history.value.pop()
         message.value = res.message
+        shouldRestart = wasAssisting
         return
       }
-      
+
       // 从服务器同步棋盘状态
       board.value = res.board
       winRate.value = res.win_rate
       // 记录本回合胜率（一回合 = 玩家落子 + AI落子）
       winRateHistory.value.push(res.win_rate)
-      
+
       if (res.ai_move) {
         lastMove.value = res.ai_move
         history.value.push(res.ai_move)
       }
-      
+
       if (res.game_over) {
         gameOver.value = true
         winner.value = res.winner
         winnerLine.value = res.winner_line
         message.value = res.message || winnerName.value
+        // 游戏结束，不重启义眼
       } else {
         message.value = '请落子'
         currentPlayer.value = playerColor.value
+        shouldRestart = wasAssisting  // 棋局继续，从新棋盘位置重启义眼
       }
     } catch (error: any) {
       // 请求失败，撤销本地更新
       board.value[x][y] = 0
       lastMove.value = history.value.length > 1 ? history.value[history.value.length - 2] : null
       history.value.pop()
-      
+
       // 检查是否超时
       if (error.response?.status === 408) {
         message.value = '游戏已超时，请重新开始'
@@ -159,30 +165,39 @@ export const useGameStore = defineStore('game', () => {
         gameId.value = null
       } else {
         message.value = '落子失败'
+        shouldRestart = wasAssisting
       }
       console.error(error)
     } finally {
       isThinking.value = false
+      if (shouldRestart) {
+        startAiAssist()
+      }
     }
   }
 
   async function undo() {
     if (!gameId.value || history.value.length < 2) return
 
+    const wasAssisting = aiAssistMode.value
+    if (wasAssisting) stopAiAssist()
+
+    let shouldRestart = false
+
     try {
       const res = await gameApi.undoMove(gameId.value)
-      
+
       if (res.success) {
         board.value = res.board
         currentPlayer.value = res.current_player
         gameOver.value = false
         winner.value = 0
         winnerLine.value = null
-        
+
         // 移除最后两步
         history.value.pop()
         history.value.pop()
-        
+
         // 从历史恢复胜率
         winRateHistory.value.pop()
         if (winRateHistory.value.length > 0) {
@@ -190,23 +205,27 @@ export const useGameStore = defineStore('game', () => {
         } else {
           winRate.value = 0.5
         }
-        
+
         if (history.value.length > 0) {
           lastMove.value = history.value[history.value.length - 1]
         } else {
           lastMove.value = null
         }
-        
-        // 停止 AI 辅助模式
-        stopAiAssist()
-        
+
         message.value = '悔棋成功'
+        shouldRestart = wasAssisting  // 悔棋后从新棋盘位置重启义眼
       } else {
         message.value = res.message
+        shouldRestart = wasAssisting
       }
     } catch (error) {
       message.value = '悔棋失败'
       console.error(error)
+      shouldRestart = wasAssisting
+    } finally {
+      if (shouldRestart) {
+        startAiAssist()
+      }
     }
   }
 

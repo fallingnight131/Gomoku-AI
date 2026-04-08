@@ -91,7 +91,7 @@ watch(playerFirst, () => {
         @click="gameStore.toggleAiAssist"
         :disabled="gameStore.isThinking || !gameStore.isPlayerTurn || gameStore.gameOver"
       >
-        {{ gameStore.aiAssistMode ? '关闭义眼' : '电子义眼' }}
+        {{ gameStore.aiAssistMode ? '血肉苦难' : '机械飞升' }}
       </button>
     </div>
     
